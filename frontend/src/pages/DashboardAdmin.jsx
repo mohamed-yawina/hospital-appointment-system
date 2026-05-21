@@ -19,12 +19,22 @@ import {
   FunnelIcon,
   ArrowPathIcon,
   DocumentTextIcon,
-  ExclamationTriangleIcon
+  ExclamationTriangleIcon,
+  ChatBubbleLeftRightIcon
 } from '@heroicons/react/24/outline'
 import { StarIcon as StarSolidIcon } from '@heroicons/react/24/solid'
 import api from '../services/api'
 import doctorService from '../services/doctorService'
+import reviewService from '../services/reviewService'
 import appointmentService from '../services/appointmentService'
+import { doctorName, patientName, patientEmail } from '../utils/doctorPatient'
+
+const APPOINTMENT_STATUSES = [
+  { value: 'EN_ATTENTE', label: 'En attente' },
+  { value: 'CONFIRME', label: 'Confirmé' },
+  { value: 'TERMINE', label: 'Terminé' },
+  { value: 'ANNULE', label: 'Annulé' }
+]
 
 function DashboardAdmin() {
   const [users, setUsers] = useState([])
@@ -55,40 +65,58 @@ function DashboardAdmin() {
     averageRating: 0
   })
   const [reviews, setReviews] = useState([])
+  const [updatingAppointmentId, setUpdatingAppointmentId] = useState(null)
 
   useEffect(() => {
     fetchAllData()
   }, [])
 
   const fetchAllData = async () => {
-    const token = localStorage.getItem('token');
-    console.log('🔑 Token présent:', token ? 'OUI' : 'NON');
-    
     setLoading(true)
     try {
-        const [usersRes, doctorsRes, appointmentsRes, specialtiesRes] = await Promise.all([
-            api.get('/admin/users'),
-            doctorService.getAllDoctors(),
-            appointmentService.getMyAppointments(),
-            api.get('/specialties')
-        ])
+      const usersRes = await api.get('/admin/users').catch((e) => {
+        console.error('Admin utilisateurs:', e.response?.status, e.response?.data ?? e.message)
+        return { data: [] }
+      })
+      const doctorsRes = await doctorService.getAllDoctors().catch((e) => {
+        console.error('Médecins:', e.response?.status, e.response?.data ?? e.message)
+        return []
+      })
+      const appointmentsRes = await api.get('/admin/appointments').catch((e) => {
+        console.error('Rendez-vous admin:', e.response?.status, e.response?.data ?? e.message)
+        const errMsg = e.response?.data?.message
+        if (errMsg) {
+          showMessage(errMsg, 'error')
+        }
+        return { data: [] }
+      })
+      const specialtiesRes = await api.get('/specialties').catch((e) => {
+        console.error('Spécialités:', e.response?.status, e.response?.data ?? e.message)
+        return { data: [] }
+      })
+      const reviewsRes = await reviewService.getAllReviewsAdmin().catch((e) => {
+        console.error('Avis admin:', e.response?.status, e.response?.data ?? e.message)
+        const errMsg = e.response?.data?.message
+        if (errMsg) showMessage(errMsg, 'error')
+        return []
+      })
 
-      setUsers(usersRes.data || [])
-      setDoctors(doctorsRes || [])
-      setAppointments(appointmentsRes || [])
-      setSpecialties(specialtiesRes.data || [])
+      const usersList = Array.isArray(usersRes.data) ? usersRes.data : []
+      const doctorsList = Array.isArray(doctorsRes) ? doctorsRes : []
+      const appointmentsList = Array.isArray(appointmentsRes.data) ? appointmentsRes.data : []
+      const specialtiesList = Array.isArray(specialtiesRes.data) ? specialtiesRes.data : []
 
-      const savedReviews = localStorage.getItem('patientReviews')
-      if (savedReviews) {
-        const allReviews = JSON.parse(savedReviews)
-        setReviews(allReviews)
-      }
+      setUsers(usersList)
+      setDoctors(doctorsList)
+      setAppointments(appointmentsList)
+      setSpecialties(specialtiesList)
+      setReviews(Array.isArray(reviewsRes) ? reviewsRes : [])
 
-      calculateStats(usersRes.data || [], doctorsRes || [], appointmentsRes || [], specialtiesRes.data || [])
-     } catch (error) {
-        console.error('Erreur détaillée:', error.response?.data)
-        showMessage('Erreur lors du chargement des données', 'error')
-    }finally {
+      calculateStats(usersList, doctorsList, appointmentsList, specialtiesList)
+    } catch (error) {
+      console.error('Erreur chargement admin:', error.response?.data ?? error)
+      showMessage('Erreur lors du chargement des données', 'error')
+    } finally {
       setTimeout(() => setLoading(false), 600)
     }
   }
@@ -102,7 +130,11 @@ function DashboardAdmin() {
       totalAppointments: appointmentsList.length,
       completedAppointments: appointmentsList.filter(a => a.status === 'TERMINE').length,
       cancelledAppointments: appointmentsList.filter(a => a.status === 'ANNULE').length,
-      upcomingAppointments: appointmentsList.filter(a => a.status === 'CONFIRME' && new Date(a.date) > now).length,
+      upcomingAppointments: appointmentsList.filter(
+        (a) =>
+          (a.status === 'CONFIRME' || a.status === 'EN_ATTENTE') &&
+          new Date(a.date) > now
+      ).length,
       totalSpecialties: specialtiesList.length,
       averageRating: 4.8
     })
@@ -189,6 +221,27 @@ function DashboardAdmin() {
     }
   }
 
+  const handleValidateReview = async (reviewId) => {
+    try {
+      await reviewService.validateReview(reviewId)
+      showMessage('Avis validé — visible sur la page d’accueil', 'success')
+      fetchAllData()
+    } catch (error) {
+      showMessage(error.response?.data?.message || 'Erreur lors de la validation', 'error')
+    }
+  }
+
+  const handleDeleteReview = async (reviewId) => {
+    if (!window.confirm('Supprimer définitivement cet avis ?')) return
+    try {
+      await reviewService.deleteReview(reviewId)
+      showMessage('Avis supprimé', 'success')
+      fetchAllData()
+    } catch (error) {
+      showMessage(error.response?.data?.message || 'Erreur lors de la suppression', 'error')
+    }
+  }
+
   const handleDeleteSpecialty = async (specialtyId) => {
     if (!window.confirm('Êtes-vous sûr de vouloir supprimer cette spécialité ?')) return
     try {
@@ -212,12 +265,64 @@ function DashboardAdmin() {
 
   const getStatusBadge = (status) => {
     const config = {
+      EN_ATTENTE: { bg: 'bg-amber-100', text: 'text-amber-800', label: 'En attente' },
       CONFIRME: { bg: 'bg-green-100', text: 'text-green-700', label: 'Confirmé' },
       ANNULE: { bg: 'bg-red-100', text: 'text-red-700', label: 'Annulé' },
       TERMINE: { bg: 'bg-blue-100', text: 'text-blue-700', label: 'Terminé' }
     }
-    const style = config[status] || config.CONFIRME
+    const style = config[status] || config.EN_ATTENTE
     return <span className={`px-2 py-1 rounded-full text-xs font-semibold ${style.bg} ${style.text}`}>{style.label}</span>
+  }
+
+  const refreshAppointmentsStats = (appointmentsList) => {
+    calculateStats(users, doctors, appointmentsList, specialties)
+  }
+
+  const handleAppointmentStatusChange = async (apt, newStatus) => {
+    if (!newStatus || newStatus === apt.status) return
+
+    if (newStatus === 'ANNULE') {
+      const ok = window.confirm(
+        `Annuler le rendez-vous #${apt.id} (${patientName(apt.patient) || 'patient'}) ?`
+      )
+      if (!ok) return
+    }
+
+    setUpdatingAppointmentId(apt.id)
+    try {
+      let updated
+      if (newStatus === 'ANNULE') {
+        updated = await appointmentService.cancelAppointmentById(apt.id)
+      } else if (newStatus === 'CONFIRME' && apt.status === 'EN_ATTENTE') {
+        updated = await appointmentService.confirmAppointment(apt.id)
+      } else {
+        updated = await appointmentService.updateAppointmentStatus(apt.id, newStatus)
+      }
+
+      const nextList = appointments.map((a) => (a.id === apt.id ? updated : a))
+      setAppointments(nextList)
+      refreshAppointmentsStats(nextList)
+      const mailTo = patientEmail(updated?.patient) || patientEmail(apt.patient)
+      if (newStatus === 'CONFIRME' || newStatus === 'ANNULE') {
+        showMessage(
+          mailTo
+            ? `Statut mis à jour. Notification email destinée à : ${mailTo} (boîte du patient, pas celle de l'admin)`
+            : 'Statut mis à jour (email patient introuvable en base)',
+          'success'
+        )
+      } else {
+        showMessage('Statut du rendez-vous mis à jour', 'success')
+      }
+    } catch (error) {
+      const msg =
+        error.response?.data?.message ||
+        error.response?.data ||
+        error.message ||
+        'Impossible de modifier le statut'
+      showMessage(typeof msg === 'string' ? msg : 'Erreur lors de la mise à jour du statut', 'error')
+    } finally {
+      setUpdatingAppointmentId(null)
+    }
   }
 
   const filteredUsers = users.filter(user => {
@@ -227,10 +332,34 @@ function DashboardAdmin() {
     return matchesSearch && matchesRole
   })
 
-  const filteredAppointments = appointments.filter(apt => {
-    return apt.patient?.user?.name?.toLowerCase().includes(searchTerm.toLowerCase()) ||
-           apt.doctor?.user?.name?.toLowerCase().includes(searchTerm.toLowerCase())
+  const filteredAppointments = appointments.filter((apt) => {
+    const q = searchTerm.trim().toLowerCase()
+    if (!q) return true
+    const p = (patientName(apt.patient) || '').toLowerCase()
+    const d = (doctorName(apt.doctor) || '').toLowerCase()
+    return p.includes(q) || d.includes(q)
   })
+
+  const filteredReviews = reviews.filter((r) => {
+    const q = searchTerm.trim().toLowerCase()
+    if (!q) return true
+    const p = (patientName(r.patient) || '').toLowerCase()
+    const d = (doctorName(r.doctor) || '').toLowerCase()
+    const c = (r.commentaire || '').toLowerCase()
+    return p.includes(q) || d.includes(q) || c.includes(q)
+  })
+
+  const renderStars = (note) => (
+    <span className="inline-flex gap-0.5">
+      {[1, 2, 3, 4, 5].map((i) =>
+        i <= note ? (
+          <StarSolidIcon key={i} className="w-4 h-4 text-yellow-400" />
+        ) : (
+          <StarIcon key={i} className="w-4 h-4 text-gray-300" />
+        )
+      )}
+    </span>
+  )
 
   if (loading) {
     return (
@@ -367,6 +496,7 @@ function DashboardAdmin() {
                 { id: 'users', label: '👥 Utilisateurs', icon: <UserGroupIcon className="w-5 h-5" /> },
                 { id: 'specialties', label: '🏥 Spécialités', icon: <StarIcon className="w-5 h-5" /> },
                 { id: 'appointments', label: '📅 Rendez-vous', icon: <CalendarIcon className="w-5 h-5" /> },
+                { id: 'reviews', label: '💬 Avis', icon: <ChatBubbleLeftRightIcon className="w-5 h-5" /> },
                 { id: 'statistics', label: '📊 Statistiques', icon: <ChartBarIcon className="w-5 h-5" /> }
               ].map((tab) => (
                 <button
@@ -583,23 +713,66 @@ function DashboardAdmin() {
                       <tr>
                         <th className="px-4 py-3 text-left text-xs font-semibold text-gray-600">ID</th>
                         <th className="px-4 py-3 text-left text-xs font-semibold text-gray-600">Patient</th>
+                        <th className="px-4 py-3 text-left text-xs font-semibold text-gray-600">Email patient</th>
                         <th className="px-4 py-3 text-left text-xs font-semibold text-gray-600">Médecin</th>
                         <th className="px-4 py-3 text-left text-xs font-semibold text-gray-600">Spécialité</th>
                         <th className="px-4 py-3 text-left text-xs font-semibold text-gray-600">Date</th>
                         <th className="px-4 py-3 text-left text-xs font-semibold text-gray-600">Statut</th>
+                        <th className="px-4 py-3 text-left text-xs font-semibold text-gray-600">Actions</th>
                       </tr>
                     </thead>
                     <tbody className="divide-y divide-gray-100">
                       {filteredAppointments.map((apt) => (
                         <tr key={apt.id} className="hover:bg-gray-50 transition">
                           <td className="px-4 py-3 text-sm text-gray-600">{apt.id}</td>
-                          <td className="px-4 py-3 font-medium text-gray-800">{apt.patient?.user?.name || 'N/A'}</td>
-                          <td className="px-4 py-3 text-gray-800">Dr. {apt.doctor?.user?.name || 'N/A'}</td>
+                          <td className="px-4 py-3 font-medium text-gray-800">{patientName(apt.patient) || 'N/A'}</td>
+                          <td className="px-4 py-3 text-sm text-gray-600">{patientEmail(apt.patient) || '—'}</td>
+                          <td className="px-4 py-3 text-gray-800">Dr. {doctorName(apt.doctor) || 'N/A'}</td>
                           <td className="px-4 py-3 text-sm text-gray-600">{apt.doctor?.specialty?.name || 'Généraliste'}</td>
                           <td className="px-4 py-3 text-sm text-gray-600">
                             {new Date(apt.date).toLocaleDateString('fr-FR')} à {new Date(apt.date).toLocaleTimeString('fr-FR', { hour: '2-digit', minute: '2-digit' })}
                           </td>
                           <td className="px-4 py-3">{getStatusBadge(apt.status)}</td>
+                          <td className="px-4 py-3">
+                            <div className="flex flex-wrap items-center gap-2">
+                              <select
+                                value={apt.status}
+                                disabled={updatingAppointmentId === apt.id}
+                                onChange={(e) => handleAppointmentStatusChange(apt, e.target.value)}
+                                className="text-sm border border-gray-200 rounded-lg px-2 py-1.5 bg-white focus:outline-none focus:ring-2 focus:ring-blue-500 disabled:opacity-50 min-w-[8.5rem]"
+                                aria-label={`Changer le statut du rendez-vous ${apt.id}`}
+                              >
+                                {APPOINTMENT_STATUSES.map((s) => (
+                                  <option key={s.value} value={s.value}>
+                                    {s.label}
+                                  </option>
+                                ))}
+                              </select>
+                              {updatingAppointmentId === apt.id && (
+                                <ArrowPathIcon className="w-4 h-4 text-blue-600 animate-spin" />
+                              )}
+                              {apt.status === 'EN_ATTENTE' && (
+                                <button
+                                  type="button"
+                                  disabled={updatingAppointmentId === apt.id}
+                                  onClick={() => handleAppointmentStatusChange(apt, 'CONFIRME')}
+                                  className="text-xs font-semibold text-green-700 bg-green-50 hover:bg-green-100 px-2 py-1 rounded-lg disabled:opacity-50"
+                                >
+                                  Confirmer
+                                </button>
+                              )}
+                              {apt.status !== 'ANNULE' && apt.status !== 'TERMINE' && (
+                                <button
+                                  type="button"
+                                  disabled={updatingAppointmentId === apt.id}
+                                  onClick={() => handleAppointmentStatusChange(apt, 'ANNULE')}
+                                  className="text-xs font-semibold text-red-700 bg-red-50 hover:bg-red-100 px-2 py-1 rounded-lg disabled:opacity-50"
+                                >
+                                  Annuler
+                                </button>
+                              )}
+                            </div>
+                          </td>
                         </tr>
                       ))}
                     </tbody>
@@ -610,6 +783,102 @@ function DashboardAdmin() {
                   <div className="text-center py-12">
                     <CalendarIcon className="w-16 h-16 text-gray-300 mx-auto mb-4" />
                     <p className="text-gray-500">Aucun rendez-vous trouvé</p>
+                  </div>
+                )}
+              </div>
+            )}
+
+            {/* Tab: Avis */}
+            {activeTab === 'reviews' && (
+              <div>
+                <div className="flex justify-between items-center mb-6 flex-wrap gap-4">
+                  <h2 className="text-xl font-bold text-gray-800 flex items-center gap-2">
+                    <ChatBubbleLeftRightIcon className="w-6 h-6 text-blue-600" />
+                    Modération des avis
+                  </h2>
+                  <div className="relative">
+                    <MagnifyingGlassIcon className="absolute left-3 top-1/2 transform -translate-y-1/2 w-4 h-4 text-gray-400" />
+                    <input
+                      type="text"
+                      placeholder="Rechercher un avis..."
+                      value={searchTerm}
+                      onChange={(e) => setSearchTerm(e.target.value)}
+                      className="pl-9 pr-3 py-2 border border-gray-200 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500 w-64"
+                    />
+                  </div>
+                </div>
+
+                <p className="text-sm text-gray-500 mb-4">
+                  Validez un avis pour l’afficher dans la section « Avis » de la page d’accueil. Les avis en attente ne sont pas publics.
+                </p>
+
+                <div className="overflow-x-auto">
+                  <table className="w-full">
+                    <thead className="bg-gray-50">
+                      <tr>
+                        <th className="px-4 py-3 text-left text-xs font-semibold text-gray-600">ID</th>
+                        <th className="px-4 py-3 text-left text-xs font-semibold text-gray-600">Patient</th>
+                        <th className="px-4 py-3 text-left text-xs font-semibold text-gray-600">Médecin</th>
+                        <th className="px-4 py-3 text-left text-xs font-semibold text-gray-600">Note</th>
+                        <th className="px-4 py-3 text-left text-xs font-semibold text-gray-600">Commentaire</th>
+                        <th className="px-4 py-3 text-left text-xs font-semibold text-gray-600">Statut</th>
+                        <th className="px-4 py-3 text-left text-xs font-semibold text-gray-600">Actions</th>
+                      </tr>
+                    </thead>
+                    <tbody className="divide-y divide-gray-100">
+                      {filteredReviews.map((r) => (
+                        <tr key={r.id} className="hover:bg-gray-50 transition align-top">
+                          <td className="px-4 py-3 text-sm text-gray-600">{r.id}</td>
+                          <td className="px-4 py-3 font-medium text-gray-800">{patientName(r.patient) || '—'}</td>
+                          <td className="px-4 py-3 text-gray-800">
+                            Dr. {doctorName(r.doctor) || '—'}
+                            <span className="block text-xs text-gray-500">{r.doctor?.specialty?.name || ''}</span>
+                          </td>
+                          <td className="px-4 py-3">{renderStars(r.note)}</td>
+                          <td className="px-4 py-3 text-sm text-gray-600 max-w-xs">{r.commentaire}</td>
+                          <td className="px-4 py-3">
+                            {r.validated ? (
+                              <span className="px-2 py-1 rounded-full text-xs font-semibold bg-green-100 text-green-700">
+                                Publié
+                              </span>
+                            ) : (
+                              <span className="px-2 py-1 rounded-full text-xs font-semibold bg-amber-100 text-amber-800">
+                                En attente
+                              </span>
+                            )}
+                          </td>
+                          <td className="px-4 py-3">
+                            <div className="flex gap-2 flex-wrap">
+                              {!r.validated && (
+                                <button
+                                  type="button"
+                                  onClick={() => handleValidateReview(r.id)}
+                                  className="px-3 py-1.5 bg-green-600 text-white text-xs font-medium rounded-lg hover:bg-green-700 flex items-center gap-1"
+                                >
+                                  <CheckCircleIcon className="w-4 h-4" />
+                                  Valider
+                                </button>
+                              )}
+                              <button
+                                type="button"
+                                onClick={() => handleDeleteReview(r.id)}
+                                className="px-3 py-1.5 bg-red-100 text-red-700 text-xs font-medium rounded-lg hover:bg-red-200 flex items-center gap-1"
+                              >
+                                <TrashIcon className="w-4 h-4" />
+                                Supprimer
+                              </button>
+                            </div>
+                          </td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+
+                {filteredReviews.length === 0 && (
+                  <div className="text-center py-12">
+                    <ChatBubbleLeftRightIcon className="w-16 h-16 text-gray-300 mx-auto mb-4" />
+                    <p className="text-gray-500">Aucun avis à modérer</p>
                   </div>
                 )}
               </div>

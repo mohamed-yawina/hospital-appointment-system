@@ -5,6 +5,7 @@ import com.example.hospital.repository.*;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.stereotype.Service;
 import java.util.HashMap;
+import java.util.List;
 import java.util.Map;
 
 @Service
@@ -21,6 +22,15 @@ public class AdminService {
 
     @Autowired
     private AppointmentRepository appointmentRepository;
+
+    public List<User> findAllUsers() {
+        return userRepository.findAll();
+    }
+
+    /** Tous les rendez-vous (tableau de bord administrateur). */
+    public List<Appointment> findAllAppointments() {
+        return appointmentRepository.findAllWithDetails();
+    }
 
     public void addSpecialty(String name) {
         Specialty specialty = new Specialty();
@@ -45,7 +55,7 @@ public class AdminService {
         stats.put("totalAppointments", appointmentRepository.count());
 
 
-        long confirmedAppointments = appointmentRepository.findAll().stream()
+        long confirmedAppointments = appointmentRepository.findAllWithDetails().stream()
                 .filter(a -> a.getStatus() == AppointmentStatus.CONFIRME)
                 .count();
         stats.put("confirmedAppointments", confirmedAppointments);

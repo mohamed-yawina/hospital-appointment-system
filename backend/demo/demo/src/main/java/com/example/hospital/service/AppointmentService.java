@@ -1,24 +1,27 @@
 package com.example.hospital.service;
 
-import com.example.hospital.entity.*;
 import com.example.hospital.dto.AppointmentRequest;
-import com.example.hospital.repository.*;
+import com.example.hospital.entity.*;
+import com.example.hospital.repository.AppointmentRepository;
+import com.example.hospital.repository.AvailabilityRepository;
+import com.example.hospital.repository.DoctorRepository;
+import com.example.hospital.repository.UserRepository;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
+
+import java.time.LocalDateTime;
 import java.util.List;
 
 @Service
 public class AppointmentService {
 
+    private static final Logger log = LoggerFactory.getLogger(AppointmentService.class);
+
     @Autowired
     private AppointmentRepository appointmentRepository;
-
-    @Autowired
-    private PatientRepository patientRepository;
-
-    @Autowired
-    private DoctorRepository doctorRepository;
 
     @Autowired
     private UserRepository userRepository;
@@ -26,81 +29,168 @@ public class AppointmentService {
     @Autowired
     private NotificationService notificationService;
 
-    // 1️⃣ Créer un rendez-vous
+    @Autowired
+    private AvailabilityRepository availabilityRepository;
+
+    @Autowired
+    private DoctorRepository doctorRepository;
+
     @Transactional
     public Appointment createAppointment(String userEmail, AppointmentRequest request) {
         User user = userRepository.findByEmail(userEmail)
                 .orElseThrow(() -> new RuntimeException("User not found"));
-
-        Patient patient = patientRepository.findByUser(user)
-                .orElseThrow(() -> new RuntimeException("Patient not found"));
+        if (!(user instanceof Patient patient)) {
+            throw new RuntimeException("Seuls les patients peuvent demander un rendez-vous");
+        }
 
         Doctor doctor = doctorRepository.findById(request.getDoctorId())
                 .orElseThrow(() -> new RuntimeException("Doctor not found"));
 
-        // Vérifier si le créneau est déjà pris
+        if (!availabilityRepository.existsSlotCovering(doctor, request.getDate())) {
+            throw new RuntimeException("Ce créneau ne correspond pas à une disponibilité du médecin");
+        }
+
         if (appointmentRepository.existsByDoctorAndDate(doctor, request.getDate())) {
-            throw new RuntimeException("Time slot already booked");
+            throw new RuntimeException("Créneau déjà réservé");
         }
 
         Appointment appointment = new Appointment();
         appointment.setPatient(patient);
         appointment.setDoctor(doctor);
         appointment.setDate(request.getDate());
-        appointment.setStatus(AppointmentStatus.CONFIRME);
+        appointment.setStatus(AppointmentStatus.EN_ATTENTE);
 
-        Appointment savedAppointment = appointmentRepository.save(appointment);
-
-        // Envoyer la notification
-        try {
-            notificationService.sendAppointmentConfirmation(user.getEmail(), appointment);
-        } catch (Exception e) {
-            System.out.println("Erreur d'envoi d'email: " + e.getMessage());
-        }
-
-        return savedAppointment;
+        return appointmentRepository.save(appointment);
     }
 
-    // 2️⃣ Récupérer les rendez-vous par utilisateur
+    /**
+     * Confirme un rendez-vous (diagramme RDV.confirmé après EN_ATTENTE).
+     */
+    @Transactional
+    public Appointment confirmAppointment(Long id, String actorEmail) {
+        User actor = userRepository.findByEmail(actorEmail)
+                .orElseThrow(() -> new RuntimeException("User not found"));
+        Appointment appointment = appointmentRepository.findById(id)
+                .orElseThrow(() -> new RuntimeException("Appointment not found with id: " + id));
+
+        boolean allowed = actor instanceof Administrator
+                || (actor instanceof Doctor doctor && appointment.getDoctor().getId().equals(doctor.getId()));
+        if (!allowed) {
+            throw new RuntimeException("Seul le médecin ou l'admin peut confirmer ce rendez-vous");
+        }
+
+        if (appointment.getStatus() != AppointmentStatus.EN_ATTENTE) {
+            throw new RuntimeException("Seuls les rendez-vous EN_ATTENTE peuvent être confirmés");
+        }
+
+        AppointmentStatus previous = appointment.getStatus();
+        appointment.setStatus(AppointmentStatus.CONFIRME);
+        Appointment saved = appointmentRepository.save(appointment);
+        trySendStatusEmail(saved, previous);
+        return saved;
+    }
+
+    /**
+     * Envoie un email au patient lors d'un passage vers CONFIRME ou ANNULE.
+     * Les erreurs SMTP sont journalisées mais n'empêchent pas la mise à jour du statut.
+     */
+    private void trySendStatusEmail(Appointment saved, AppointmentStatus previousStatus) {
+        AppointmentStatus newStatus = saved.getStatus();
+        String patientEmail = saved.getPatient().getEmail();
+        try {
+            if (newStatus == AppointmentStatus.CONFIRME && previousStatus != AppointmentStatus.CONFIRME) {
+                notificationService.sendAppointmentConfirmation(patientEmail, saved);
+            } else if (newStatus == AppointmentStatus.ANNULE && previousStatus != AppointmentStatus.ANNULE) {
+                notificationService.sendCancellationNotification(patientEmail, saved);
+            }
+        } catch (Exception e) {
+            log.error(
+                    "Échec envoi email à {} ({} → {}) : {}",
+                    patientEmail,
+                    previousStatus,
+                    newStatus,
+                    e.getMessage(),
+                    e
+            );
+        }
+    }
+
+    /**
+     * Reprogramme le créneau (diagramme RDV.reprogrammer) — même médecin, nouveau horaire sous réserve disponibilités.
+     */
+    @Transactional
+    public Appointment rescheduleAppointment(Long id, AppointmentRequest request, String userEmail) {
+        User user = userRepository.findByEmail(userEmail)
+                .orElseThrow(() -> new RuntimeException("User not found"));
+        Appointment appointment = appointmentRepository.findById(id)
+                .orElseThrow(() -> new RuntimeException("Appointment not found with id: " + id));
+
+        boolean allowed = user instanceof Administrator
+                || (user instanceof Patient patient && appointment.getPatient().getId().equals(patient.getId()))
+                || (user instanceof Doctor doctor && appointment.getDoctor().getId().equals(doctor.getId()));
+        if (!allowed) {
+            throw new RuntimeException("Modification non autorisée");
+        }
+
+        if (appointment.getStatus() == AppointmentStatus.ANNULE || appointment.getStatus() == AppointmentStatus.TERMINE) {
+            throw new RuntimeException("Impossible de reprogrammer un rendez-vous annulé ou terminé");
+        }
+
+        Doctor doctor = appointment.getDoctor();
+        LocalDateTime newDate = request.getDate();
+        if (!availabilityRepository.existsSlotCovering(doctor, newDate)) {
+            throw new RuntimeException("Créneau hors disponibilité du médecin");
+        }
+
+        if (!newDate.equals(appointment.getDate())
+                && appointmentRepository.existsByDoctorAndDate(doctor, newDate)) {
+            throw new RuntimeException("Créneau déjà réservé");
+        }
+
+        appointment.setDate(newDate);
+        appointment.setStatus(AppointmentStatus.EN_ATTENTE);
+        return appointmentRepository.save(appointment);
+    }
+
     public List<Appointment> getMyAppointments(String userEmail) {
         User user = userRepository.findByEmail(userEmail)
                 .orElseThrow(() -> new RuntimeException("User not found"));
 
-        if (user.getRole() == Role.PATIENT) {
-            Patient patient = patientRepository.findByUser(user)
-                    .orElseThrow(() -> new RuntimeException("Patient not found"));
+        if (user instanceof Patient patient) {
             return appointmentRepository.findByPatient(patient);
-        } else if (user.getRole() == Role.MEDECIN) {
-            Doctor doctor = doctorRepository.findByUserId(user.getId())
-                    .orElseThrow(() -> new RuntimeException("Doctor not found"));
+        }
+        if (user instanceof Doctor doctor) {
             return appointmentRepository.findByDoctor(doctor);
         }
+        if (user instanceof Administrator) {
+            return appointmentRepository.findAllWithDetails();
+        }
 
-        return appointmentRepository.findAll();
+        return appointmentRepository.findAllWithDetails();
     }
 
-    // 3️⃣ Récupérer un rendez-vous par ID
     public Appointment getAppointmentById(Long id) {
         return appointmentRepository.findById(id)
                 .orElseThrow(() -> new RuntimeException("Appointment not found with id: " + id));
     }
 
-    // 4️⃣ Mettre à jour le statut d'un rendez-vous
     @Transactional
     public Appointment updateStatus(Long id, String status) {
         Appointment appointment = appointmentRepository.findById(id)
                 .orElseThrow(() -> new RuntimeException("Appointment not found with id: " + id));
 
+        AppointmentStatus previous = appointment.getStatus();
         try {
             appointment.setStatus(AppointmentStatus.valueOf(status));
         } catch (IllegalArgumentException e) {
             throw new RuntimeException("Invalid status: " + status);
         }
 
-        return appointmentRepository.save(appointment);
+        Appointment saved = appointmentRepository.save(appointment);
+        trySendStatusEmail(saved, previous);
+        return saved;
     }
 
-    // 5️⃣ Ajouter/modifier les notes et prescription
     @Transactional
     public Appointment addConsultationNotes(Long id, String notes, String prescription) {
         Appointment appointment = appointmentRepository.findById(id)
@@ -112,18 +202,18 @@ public class AppointmentService {
         return appointmentRepository.save(appointment);
     }
 
-    // 6️⃣ Annuler un rendez-vous (médecin/admin)
     @Transactional
     public Appointment cancelAppointmentById(Long id) {
         Appointment appointment = appointmentRepository.findById(id)
                 .orElseThrow(() -> new RuntimeException("Appointment not found with id: " + id));
 
+        AppointmentStatus previous = appointment.getStatus();
         appointment.setStatus(AppointmentStatus.ANNULE);
-
-        return appointmentRepository.save(appointment);
+        Appointment saved = appointmentRepository.save(appointment);
+        trySendStatusEmail(saved, previous);
+        return saved;
     }
 
-    // 7️⃣ Annuler un rendez-vous (patient)
     @Transactional
     public void cancelAppointment(Long appointmentId, String userEmail) {
         Appointment appointment = appointmentRepository.findById(appointmentId)
@@ -132,23 +222,15 @@ public class AppointmentService {
         User user = userRepository.findByEmail(userEmail)
                 .orElseThrow(() -> new RuntimeException("User not found"));
 
-        // Vérifier l'autorisation
-        if (user.getRole() == Role.PATIENT) {
-            Patient patient = patientRepository.findByUser(user)
-                    .orElseThrow(() -> new RuntimeException("Patient not found"));
+        if (user instanceof Patient patient) {
             if (!appointment.getPatient().getId().equals(patient.getId())) {
                 throw new RuntimeException("Not authorized");
             }
         }
 
+        AppointmentStatus previous = appointment.getStatus();
         appointment.setStatus(AppointmentStatus.ANNULE);
-        appointmentRepository.save(appointment);
-
-        // Envoyer la notification d'annulation
-        try {
-            notificationService.sendCancellationNotification(user.getEmail(), appointment);
-        } catch (Exception e) {
-            System.out.println("Erreur d'envoi d'email d'annulation: " + e.getMessage());
-        }
+        Appointment saved = appointmentRepository.save(appointment);
+        trySendStatusEmail(saved, previous);
     }
 }

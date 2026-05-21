@@ -12,6 +12,7 @@ import org.springframework.security.web.authentication.WebAuthenticationDetailsS
 import org.springframework.stereotype.Component;
 import org.springframework.web.filter.OncePerRequestFilter;
 import java.io.IOException;
+import java.util.Locale;
 
 @Component
 public class JwtAuthFilter extends OncePerRequestFilter {
@@ -29,6 +30,11 @@ public class JwtAuthFilter extends OncePerRequestFilter {
 
         String path = request.getRequestURI();
 
+        if ("OPTIONS".equalsIgnoreCase(request.getMethod())) {
+            filterChain.doFilter(request, response);
+            return;
+        }
+
         // Ignorer les endpoints d'authentification
         if (path.startsWith("/api/auth/")) {
             filterChain.doFilter(request, response);
@@ -44,27 +50,26 @@ public class JwtAuthFilter extends OncePerRequestFilter {
         }
 
         final String jwt = authHeader.substring(7);
-        System.out.println("🔑 Token reçu: " + jwt.substring(0, Math.min(jwt.length(), 50)) + "...");
 
         try {
-            final String userEmail = jwtUtils.getEmailFromToken(jwt);
-            System.out.println("📧 Email extrait du token: " + userEmail);
-
-            if (userEmail != null && SecurityContextHolder.getContext().getAuthentication() == null) {
-                UserDetails userDetails = this.userDetailsService.loadUserByUsername(userEmail);
-                System.out.println("👤 UserDetails chargé: " + userDetails.getUsername());
-                System.out.println("🔐 Authorities: " + userDetails.getAuthorities());
-
-                if (jwtUtils.validateToken(jwt)) {
-                    UsernamePasswordAuthenticationToken authToken = new UsernamePasswordAuthenticationToken(
-                            userDetails, null, userDetails.getAuthorities());
-                    authToken.setDetails(new WebAuthenticationDetailsSource().buildDetails(request));
-                    SecurityContextHolder.getContext().setAuthentication(authToken);
-                    System.out.println("✅ Authentification réussie pour: " + userEmail);
-                } else {
-                    System.out.println("❌ Token invalide");
-                }
+            if (!jwtUtils.validateToken(jwt)) {
+                filterChain.doFilter(request, response);
+                return;
             }
+            String userEmail = jwtUtils.getEmailFromToken(jwt);
+            if (userEmail == null || userEmail.isBlank()) {
+                filterChain.doFilter(request, response);
+                return;
+            }
+            userEmail = userEmail.trim().toLowerCase(Locale.ROOT);
+
+            // Ne pas exiger getAuthentication() == null : un contexte précédent (ex. anonyme)
+            // bloquait alors l'injection du principal JWT → 403 sur /api/admin, /appointments.
+            UserDetails userDetails = this.userDetailsService.loadUserByUsername(userEmail);
+            UsernamePasswordAuthenticationToken authToken = new UsernamePasswordAuthenticationToken(
+                    userDetails, null, userDetails.getAuthorities());
+            authToken.setDetails(new WebAuthenticationDetailsSource().buildDetails(request));
+            SecurityContextHolder.getContext().setAuthentication(authToken);
         } catch (Exception e) {
             System.out.println("❌ Erreur lors du traitement du token: " + e.getMessage());
             e.printStackTrace();

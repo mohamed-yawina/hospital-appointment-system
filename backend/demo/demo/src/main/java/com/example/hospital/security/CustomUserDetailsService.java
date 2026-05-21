@@ -8,7 +8,9 @@ import org.springframework.security.core.userdetails.UserDetails;
 import org.springframework.security.core.userdetails.UserDetailsService;
 import org.springframework.security.core.userdetails.UsernameNotFoundException;
 import org.springframework.stereotype.Service;
+
 import java.util.Collections;
+import java.util.Locale;
 
 @Service
 public class CustomUserDetailsService implements UserDetailsService {
@@ -18,8 +20,9 @@ public class CustomUserDetailsService implements UserDetailsService {
 
     @Override
     public UserDetails loadUserByUsername(String email) throws UsernameNotFoundException {
-        User user = userRepository.findByEmail(email)
-                .orElseThrow(() -> new UsernameNotFoundException("User not found: " + email));
+        String key = email == null ? "" : email.trim().toLowerCase(Locale.ROOT);
+        User user = userRepository.findByEmailIgnoreCase(key)
+                .orElseThrow(() -> new UsernameNotFoundException("User not found: " + key));
 
         System.out.println("📝 Chargement user: " + user.getEmail() + ", rôle: " + user.getRole());
         System.out.println("🔐 Authority créée: ROLE_" + user.getRole().name());

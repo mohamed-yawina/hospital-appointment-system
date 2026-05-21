@@ -4,8 +4,11 @@ import io.jsonwebtoken.*;
 import io.jsonwebtoken.security.Keys;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Component;
+
+import java.nio.charset.StandardCharsets;
 import java.security.Key;
 import java.util.Date;
+import java.util.Locale;
 
 @Component
 public class JwtUtils {
@@ -17,7 +20,15 @@ public class JwtUtils {
     private int jwtExpiration;
 
     private Key key() {
-        return Keys.hmacShaKeyFor(jwtSecret.getBytes());
+        return Keys.hmacShaKeyFor(jwtSecret.getBytes(StandardCharsets.UTF_8));
+    }
+
+    /** Même normalisation que login / UserDetails pour éviter 403 JWT valide mais user introuvable. */
+    public static String normalizeEmail(String email) {
+        if (email == null) {
+            return "";
+        }
+        return email.trim().toLowerCase(Locale.ROOT);
     }
 
     // Version avec email uniquement
@@ -27,8 +38,9 @@ public class JwtUtils {
 
     // Version avec email et rôle
     public String generateToken(String email, String role) {
+        String subject = normalizeEmail(email);
         return Jwts.builder()
-                .setSubject(email)
+                .setSubject(subject)
                 .claim("role", role != null ? role : "USER")
                 .setIssuedAt(new Date())
                 .setExpiration(new Date(System.currentTimeMillis() + jwtExpiration))

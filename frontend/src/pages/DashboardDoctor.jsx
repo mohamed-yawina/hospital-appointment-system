@@ -20,6 +20,7 @@ import {
 } from '@heroicons/react/24/outline'
 import appointmentService from '../services/appointmentService'
 import doctorService from '../services/doctorService'
+import { patientEmail, patientName } from '../utils/doctorPatient'
 
 function DashboardDoctor() {
   const [appointments, setAppointments] = useState([])
@@ -28,17 +29,8 @@ function DashboardDoctor() {
   const [message, setMessage] = useState('')
   const [messageType, setMessageType] = useState('success')
   const [activeTab, setActiveTab] = useState('schedule')
-  const [availability, setAvailability] = useState({
-    monday: ['09:00-12:00', '14:00-17:00'],
-    tuesday: ['09:00-12:00', '14:00-17:00'],
-    wednesday: ['09:00-12:00', '14:00-17:00'],
-    thursday: ['09:00-12:00', '14:00-17:00'],
-    friday: ['09:00-12:00', '14:00-17:00'],
-    saturday: [],
-    sunday: []
-  })
-  const [selectedDay, setSelectedDay] = useState('')
-  const [newSlot, setNewSlot] = useState({ start: '09:00', end: '10:00' })
+  const [availabilitySlots, setAvailabilitySlots] = useState([])
+  const [newSlotRange, setNewSlotRange] = useState({ dateDebut: '', dateFin: '' })
   const [selectedAppointment, setSelectedAppointment] = useState(null)
   const [showConsultModal, setShowConsultModal] = useState(false)
   const [consultNotes, setConsultNotes] = useState('')
@@ -75,19 +67,36 @@ function DashboardDoctor() {
   const fetchData = async () => {
     setLoading(true)
     try {
-      const [apts, docs] = await Promise.all([
-        appointmentService.getMyAppointments(),
-        doctorService.getAllDoctors()
-      ])
-      setAppointments(apts)
-      const doc = docs.find(d => d.user?.email === user.email)
-      setDoctorInfo(doc)
-      if (doc?.availability) {
-        try {
-          const parsed = JSON.parse(doc.availability)
-          setAvailability(prev => ({ ...prev, ...parsed }))
-        } catch (e) {
-          console.error('Erreur parsing disponibilités:', e)
+      let apts = []
+      let docs = []
+      try {
+        apts = await appointmentService.getMyAppointments()
+      } catch (e) {
+        console.error('RDV médecin:', e.response?.status, e.response?.data ?? e.message)
+      }
+      try {
+        docs = await doctorService.getAllDoctors()
+      } catch (e) {
+        console.error('Liste médecins:', e.response?.status, e.response?.data ?? e.message)
+      }
+
+      const emailNorm = String(user.email || '').trim().toLowerCase()
+      setAppointments(Array.isArray(apts) ? apts : [])
+      const doc = Array.isArray(docs)
+        ? docs.find((d) => String(d.email || '').trim().toLowerCase() === emailNorm)
+        : null
+      setDoctorInfo(doc || null)
+
+      if (doc?.id) {
+        const slots = await doctorService.getAvailabilities(doc.id).catch(() => [])
+        setAvailabilitySlots(Array.isArray(slots) ? slots : [])
+      } else {
+        setAvailabilitySlots([])
+        if (emailNorm && Array.isArray(docs) && docs.length > 0 && !doc) {
+          showMessage(
+            'Aucun profil médecin ne correspond à votre compte. Vérifiez en base (dtype = Doctor et email).',
+            'error'
+          )
         }
       }
     } catch (error) {
@@ -98,61 +107,57 @@ function DashboardDoctor() {
     }
   }
 
+  const handleAddAvailabilityRange = async () => {
+    if (!doctorInfo?.id) {
+      showMessage('Médecin non trouvé', 'error')
+      return
+    }
+    if (!newSlotRange.dateDebut || !newSlotRange.dateFin) {
+      showMessage('Choisissez début et fin du créneau', 'error')
+      return
+    }
+    try {
+      await doctorService.addAvailability(doctorInfo.id, newSlotRange)
+      showMessage('Créneau ajouté', 'success')
+      setNewSlotRange({ dateDebut: '', dateFin: '' })
+      const slots = await doctorService.getAvailabilities(doctorInfo.id)
+      setAvailabilitySlots(slots || [])
+    } catch (e) {
+      console.error(e)
+      showMessage(
+        e.response?.data?.message || 'Impossible d’ajouter le créneau',
+        'error'
+      )
+    }
+  }
+
+  const handleDeleteAvailability = async (slotId) => {
+    if (!doctorInfo?.id) return
+    if (!window.confirm('Supprimer ce créneau ?')) return
+    try {
+      await doctorService.deleteAvailability(doctorInfo.id, slotId)
+      showMessage('Créneau supprimé', 'success')
+      const slots = await doctorService.getAvailabilities(doctorInfo.id)
+      setAvailabilitySlots(slots || [])
+    } catch (e) {
+      showMessage(e.response?.data?.message || 'Suppression impossible', 'error')
+    }
+  }
+
+  const handleConfirmPendingAppointment = async (apt) => {
+    try {
+      await appointmentService.confirmAppointment(apt.id)
+      showMessage('Rendez-vous confirmé', 'success')
+      await fetchData()
+    } catch (e) {
+      showMessage(e.response?.data?.message || 'Confirmation impossible', 'error')
+    }
+  }
+
   const showMessage = (msg, type = 'success') => {
     setMessage(msg)
     setMessageType(type)
     setTimeout(() => setMessage(''), 4000)
-  }
-
-  const saveAvailability = async () => {
-    if (!doctorInfo?.id) {
-      showMessage('Impossible de sauvegarder: médecin non trouvé', 'error')
-      return
-    }
-    try {
-      await doctorService.updateAvailability(doctorInfo.id, JSON.stringify(availability))
-      showMessage('Disponibilités mises à jour avec succès', 'success')
-      
-      const docs = await doctorService.getAllDoctors()
-      const updatedDoc = docs.find(d => d.user?.email === user.email)
-      if (updatedDoc?.availability) {
-        const parsed = JSON.parse(updatedDoc.availability)
-        setAvailability(prev => ({ ...prev, ...parsed }))
-      }
-    } catch (error) {
-      console.error('Erreur sauvegarde:', error)
-      showMessage('Erreur lors de la sauvegarde des disponibilités', 'error')
-    }
-  }
-
-  const addTimeSlot = () => {
-    if (!selectedDay) {
-      showMessage('Sélectionnez un jour', 'error')
-      return
-    }
-    if (!newSlot.start || !newSlot.end) {
-      showMessage('Remplissez les horaires', 'error')
-      return
-    }
-    const slot = `${newSlot.start}-${newSlot.end}`
-    if (availability[selectedDay].includes(slot)) {
-      showMessage('Ce créneau existe déjà', 'error')
-      return
-    }
-    setAvailability({
-      ...availability,
-      [selectedDay]: [...availability[selectedDay], slot].sort()
-    })
-    setNewSlot({ start: '09:00', end: '10:00' })
-    showMessage('Créneau ajouté', 'success')
-  }
-
-  const removeTimeSlot = (day, slot) => {
-    setAvailability({
-      ...availability,
-      [day]: availability[day].filter(s => s !== slot)
-    })
-    showMessage('Créneau supprimé', 'success')
   }
 
   const handleValidateConsultation = async () => {
@@ -180,7 +185,7 @@ function DashboardDoctor() {
   }
 
   const handleCancelAppointment = async (appointment) => {
-    if (window.confirm(`Êtes-vous sûr de vouloir annuler la consultation avec ${appointment.patient?.user?.name} ?`)) {
+    if (window.confirm(`Êtes-vous sûr de vouloir annuler la consultation avec ${patientName(appointment.patient)} ?`)) {
       try {
         await appointmentService.cancelAppointmentById(appointment.id)
         showMessage('Consultation annulée avec succès', 'success')
@@ -484,8 +489,22 @@ function DashboardDoctor() {
                               <div key={apt.id} className="bg-white rounded-lg p-2 shadow-sm border border-gray-100">
                                 <p className="text-xs font-semibold text-blue-600">{formatTime(apt.date)}</p>
                                 <p className="text-xs text-gray-800 font-medium mt-1 truncate">
-                                  {apt.patient?.user?.name}
+                                  {patientName(apt.patient)}
                                 </p>
+                                {apt.status === 'EN_ATTENTE' && (
+                                  <>
+                                    <p className="text-xs text-amber-700 text-center mt-1 font-medium">
+                                      En attente
+                                    </p>
+                                    <button
+                                      type="button"
+                                      onClick={() => handleConfirmPendingAppointment(apt)}
+                                      className="w-full mt-2 py-1 bg-blue-600 text-white rounded text-xs font-semibold hover:bg-blue-700 transition"
+                                    >
+                                      Confirmer
+                                    </button>
+                                  </>
+                                )}
                                 {apt.status === 'CONFIRME' && new Date(apt.date) < new Date() && (
                                   <button
                                     onClick={() => {
@@ -519,127 +538,100 @@ function DashboardDoctor() {
               </div>
             )}
 
-            {/* Tab: Disponibilités */}
+            {/* Tab: Disponibilités (intervalles backend) */}
             {activeTab === 'availability' && (
-              <div>
-                <div className="flex justify-between items-center mb-6 flex-wrap gap-4">
-                  <h2 className="text-xl font-bold text-gray-800 flex items-center gap-2">
-                    <ClockIcon className="w-6 h-6 text-blue-600" />
-                    Gestion des disponibilités
-                  </h2>
+              <div className="max-w-3xl">
+                <h2 className="text-xl font-bold text-gray-800 mb-4 flex items-center gap-2">
+                  <ClockIcon className="w-6 h-6 text-blue-600" />
+                  Fenêtres de disponibilité
+                </h2>
+                <p className="text-sm text-gray-600 mb-6">
+                  Définissez des plages (début / fin). Les patients ne pourront réserver que dans ces
+                  intervalles ; chaque créneau affiché côté patient est découpé par pas de 30 minutes.
+                </p>
+
+                <div className="bg-gradient-to-br from-blue-50 to-indigo-50 rounded-xl p-6 mb-8 border border-blue-100">
+                  <h3 className="font-semibold text-gray-800 mb-4 flex items-center gap-2">
+                    <PlusCircleIcon className="w-5 h-5 text-blue-600" />
+                    Nouvelle plage horaire
+                  </h3>
+                  <div className="grid sm:grid-cols-2 gap-4 mb-4">
+                    <div>
+                      <label className="block text-sm font-medium text-gray-700 mb-1">
+                        Début
+                      </label>
+                      <input
+                        type="datetime-local"
+                        value={newSlotRange.dateDebut}
+                        onChange={(e) =>
+                          setNewSlotRange({ ...newSlotRange, dateDebut: e.target.value })
+                        }
+                        className="w-full px-4 py-2 border border-gray-200 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500 bg-white"
+                      />
+                    </div>
+                    <div>
+                      <label className="block text-sm font-medium text-gray-700 mb-1">Fin</label>
+                      <input
+                        type="datetime-local"
+                        value={newSlotRange.dateFin}
+                        onChange={(e) =>
+                          setNewSlotRange({ ...newSlotRange, dateFin: e.target.value })
+                        }
+                        className="w-full px-4 py-2 border border-gray-200 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500 bg-white"
+                      />
+                    </div>
+                  </div>
                   <button
-                    onClick={saveAvailability}
-                    className="px-4 py-2 bg-gradient-to-r from-blue-600 to-purple-600 text-white rounded-lg hover:shadow-lg transition-all text-sm font-medium"
+                    type="button"
+                    onClick={handleAddAvailabilityRange}
+                    className="w-full bg-gradient-to-r from-blue-600 to-purple-600 text-white py-2.5 rounded-lg hover:shadow-lg transition-all font-medium"
                   >
-                    Enregistrer les modifications
+                    Ajouter cette disponibilité
                   </button>
                 </div>
 
-                <div className="grid lg:grid-cols-2 gap-6">
-                  <div className="space-y-4">
-                    {Object.entries(availability).map(([day, slots]) => {
-                      const dayNames = {
-                        monday: 'Lundi', tuesday: 'Mardi', wednesday: 'Mercredi',
-                        thursday: 'Jeudi', friday: 'Vendredi', saturday: 'Samedi', sunday: 'Dimanche'
-                      }
-                      return (
-                        <div key={day} className="border border-gray-100 rounded-xl p-4 hover:shadow-md transition">
-                          <div className="flex justify-between items-center mb-3">
-                            <h3 className="font-semibold text-gray-800">{dayNames[day]}</h3>
-                            <button
-                              onClick={() => setSelectedDay(day)}
-                              className="text-sm text-blue-600 hover:text-blue-700 flex items-center gap-1"
-                            >
-                              <PlusCircleIcon className="w-4 h-4" />
-                              Ajouter
-                            </button>
-                          </div>
-                          <div className="flex flex-wrap gap-2">
-                            {slots.length === 0 ? (
-                              <p className="text-sm text-gray-400">Aucun créneau</p>
-                            ) : (
-                              slots.map((slot, idx) => (
-                                <div key={idx} className="flex items-center gap-2 bg-gray-100 rounded-lg px-3 py-1">
-                                  <span className="text-sm text-gray-700">{slot}</span>
-                                  <button onClick={() => removeTimeSlot(day, slot)} className="text-red-400 hover:text-red-600">
-                                    <XMarkIcon className="w-4 h-4" />
-                                  </button>
-                                </div>
-                              ))
-                            )}
-                          </div>
-                        </div>
-                      )
-                    })}
-                  </div>
-
-                  <div className="bg-gradient-to-br from-blue-50 to-indigo-50 rounded-xl p-6">
-                    <h3 className="font-semibold text-gray-800 mb-4 flex items-center gap-2">
-                      <PlusCircleIcon className="w-5 h-5 text-blue-600" />
-                      Ajouter un créneau
-                    </h3>
-                    <div className="space-y-4">
-                      <div>
-                        <label className="block text-sm font-medium text-gray-700 mb-1">Jour</label>
-                        <select
-                          value={selectedDay}
-                          onChange={(e) => setSelectedDay(e.target.value)}
-                          className="w-full px-4 py-2 border border-gray-200 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500 bg-white"
-                        >
-                          <option value="">Sélectionner un jour</option>
-                          {Object.keys(availability).map(day => (
-                            <option key={day} value={day}>
-                              {{ monday: 'Lundi', tuesday: 'Mardi', wednesday: 'Mercredi', thursday: 'Jeudi', friday: 'Vendredi', saturday: 'Samedi', sunday: 'Dimanche' }[day]}
-                            </option>
-                          ))}
-                        </select>
-                      </div>
-                      <div className="grid grid-cols-2 gap-3">
-                        <div>
-                          <label className="block text-sm font-medium text-gray-700 mb-1">Début</label>
-                          <input
-                            type="time"
-                            value={newSlot.start}
-                            onChange={(e) => setNewSlot({ ...newSlot, start: e.target.value })}
-                            className="w-full px-4 py-2 border border-gray-200 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500"
-                          />
-                        </div>
-                        <div>
-                          <label className="block text-sm font-medium text-gray-700 mb-1">Fin</label>
-                          <input
-                            type="time"
-                            value={newSlot.end}
-                            onChange={(e) => setNewSlot({ ...newSlot, end: e.target.value })}
-                            className="w-full px-4 py-2 border border-gray-200 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500"
-                          />
-                        </div>
-                      </div>
-                      <button
-                        onClick={addTimeSlot}
-                        className="w-full bg-gradient-to-r from-blue-600 to-purple-600 text-white py-2 rounded-lg hover:shadow-lg transition-all font-medium"
-                      >
-                        Ajouter le créneau
-                      </button>
-                    </div>
-
-                    {selectedDay && availability[selectedDay].length > 0 && (
-                      <div className="mt-6 pt-4 border-t border-blue-200">
-                        <p className="text-sm font-medium text-gray-700 mb-2">
-                          Créneaux du {{
-                            monday: 'Lundi', tuesday: 'Mardi', wednesday: 'Mercredi',
-                            thursday: 'Jeudi', friday: 'Vendredi', saturday: 'Samedi', sunday: 'Dimanche'
-                          }[selectedDay]} :
-                        </p>
-                        <div className="flex flex-wrap gap-2">
-                          {availability[selectedDay].map((slot, idx) => (
-                            <span key={idx} className="bg-white rounded-lg px-3 py-1 text-sm shadow-sm">
-                              {slot}
+                <div>
+                  <h3 className="font-semibold text-gray-800 mb-3">Mes plages actuelles</h3>
+                  {availabilitySlots.length === 0 ? (
+                    <p className="text-sm text-gray-500">
+                      Aucune plage. Ajoutez au moins une disponibilité pour que les patients puissent
+                      réserver.
+                    </p>
+                  ) : (
+                    <ul className="divide-y divide-gray-100 rounded-xl border border-gray-100 overflow-hidden">
+                      {[...availabilitySlots]
+                        .sort(
+                          (a, b) =>
+                            new Date(a.dateDebut).getTime() -
+                            new Date(b.dateDebut).getTime()
+                        )
+                        .map((slot) => (
+                          <li
+                            key={slot.id}
+                            className="flex flex-wrap items-center justify-between gap-3 px-4 py-3 bg-white hover:bg-gray-50"
+                          >
+                            <span className="text-sm text-gray-800">
+                              Du{' '}
+                              <strong>
+                                {new Date(slot.dateDebut).toLocaleString('fr-FR')}
+                              </strong>{' '}
+                              au{' '}
+                              <strong>
+                                {new Date(slot.dateFin).toLocaleString('fr-FR')}
+                              </strong>
                             </span>
-                          ))}
-                        </div>
-                      </div>
-                    )}
-                  </div>
+                            <button
+                              type="button"
+                              onClick={() => handleDeleteAvailability(slot.id)}
+                              className="text-xs text-red-600 hover:text-red-800 flex items-center gap-1 px-3 py-1 rounded-lg hover:bg-red-50"
+                            >
+                              <XMarkIcon className="w-4 h-4" />
+                              Supprimer
+                            </button>
+                          </li>
+                        ))}
+                    </ul>
+                  )}
                 </div>
               </div>
             )}
@@ -664,15 +656,18 @@ function DashboardDoctor() {
                   <div className="space-y-4">
                     {appointments.map((apt) => {
                       const isPast = new Date(apt.date) < new Date()
+                      const isPending = apt.status === 'EN_ATTENTE'
                       const isUpcoming = apt.status === 'CONFIRME' && !isPast
                       const isCompleted = apt.status === 'TERMINE'
                       const isCancelled = apt.status === 'ANNULE'
-                      
+
                       let statusBadge = null
                       if (isCompleted) {
                         statusBadge = { label: '✅ Terminé', color: 'bg-blue-100 text-blue-700', icon: <CheckCircleIcon className="w-3 h-3" /> }
                       } else if (isCancelled) {
                         statusBadge = { label: '❌ Annulé', color: 'bg-red-100 text-red-700', icon: <XMarkIcon className="w-3 h-3" /> }
+                      } else if (isPending) {
+                        statusBadge = { label: '⏳ Demande à confirmer', color: 'bg-amber-100 text-amber-800', icon: <ClockIcon className="w-3 h-3" /> }
                       } else if (isUpcoming) {
                         statusBadge = { label: '📅 Confirmé', color: 'bg-green-100 text-green-700', icon: <CheckCircleIcon className="w-3 h-3" /> }
                       } else {
@@ -696,14 +691,14 @@ function DashboardDoctor() {
                                   isCompleted ? 'bg-gradient-to-br from-green-500 to-emerald-500' :
                                   'bg-gradient-to-br from-blue-500 to-purple-500'
                                 }`}>
-                                  {apt.patient?.user?.name?.charAt(0) || 'P'}
+                                  {patientName(apt.patient)?.charAt(0) || 'P'}
                                 </div>
                                 <div>
                                   <h3 className="font-semibold text-gray-800">
-                                    {apt.patient?.user?.name || 'Patient'}
+                                    {patientName(apt.patient) || 'Patient'}
                                   </h3>
                                   <p className="text-xs text-gray-500">
-                                    {apt.patient?.user?.email || 'Email non disponible'}
+                                    {patientEmail(apt.patient) || 'Email non disponible'}
                                   </p>
                                 </div>
                                 <span className={`inline-flex items-center gap-1 px-2 py-1 rounded-full text-xs font-semibold ${statusBadge.color}`}>
@@ -740,6 +735,17 @@ function DashboardDoctor() {
                                 <EyeIcon className="w-4 h-4" />
                                 Détails
                               </button>
+
+                              {apt.status === 'EN_ATTENTE' && (
+                                <button
+                                  type="button"
+                                  onClick={() => handleConfirmPendingAppointment(apt)}
+                                  className="px-3 py-1.5 text-sm text-white bg-blue-600 rounded-lg hover:bg-blue-700 transition flex items-center gap-1"
+                                >
+                                  <CheckCircleIcon className="w-4 h-4" />
+                                  Confirmer le RDV
+                                </button>
+                              )}
                               
                               <button
                                 onClick={() => openStatusModal(apt)}
@@ -819,7 +825,7 @@ function DashboardDoctor() {
                 <div className="grid grid-cols-2 gap-4">
                   <div>
                     <p className="text-sm text-gray-500">Patient</p>
-                    <p className="font-semibold text-gray-800">{selectedAppointment.patient?.user?.name}</p>
+                    <p className="font-semibold text-gray-800">{patientName(selectedAppointment.patient)}</p>
                   </div>
                   <div>
                     <p className="text-sm text-gray-500">Date</p>
@@ -833,7 +839,7 @@ function DashboardDoctor() {
                   </div>
                   <div>
                     <p className="text-sm text-gray-500">Contact</p>
-                    <p className="font-semibold text-gray-800">{selectedAppointment.patient?.user?.email}</p>
+                    <p className="font-semibold text-gray-800">{patientEmail(selectedAppointment.patient)}</p>
                   </div>
                 </div>
               </div>
@@ -893,7 +899,7 @@ function DashboardDoctor() {
                 <div className="grid grid-cols-2 gap-4">
                   <div>
                     <p className="text-sm text-gray-500">Patient</p>
-                    <p className="font-semibold text-gray-800">{selectedAppointmentDetails.patient?.user?.name}</p>
+                    <p className="font-semibold text-gray-800">{patientName(selectedAppointmentDetails.patient)}</p>
                   </div>
                   <div>
                     <p className="text-sm text-gray-500">Statut</p>
@@ -915,7 +921,7 @@ function DashboardDoctor() {
                   </div>
                   <div>
                     <p className="text-sm text-gray-500">Email</p>
-                    <p className="font-semibold text-gray-800">{selectedAppointmentDetails.patient?.user?.email}</p>
+                    <p className="font-semibold text-gray-800">{patientEmail(selectedAppointmentDetails.patient)}</p>
                   </div>
                 </div>
               </div>
@@ -970,10 +976,10 @@ function DashboardDoctor() {
               <div className="bg-gray-50 rounded-xl p-4 mb-4">
                 <div className="flex items-center gap-3">
                   <div className="w-10 h-10 bg-gradient-to-br from-blue-500 to-purple-500 rounded-xl flex items-center justify-center text-white font-bold">
-                    {selectedStatusAppointment.patient?.user?.name?.charAt(0) || 'P'}
+                    {patientName(selectedStatusAppointment.patient)?.charAt(0) || 'P'}
                   </div>
                   <div>
-                    <p className="font-semibold text-gray-800">{selectedStatusAppointment.patient?.user?.name}</p>
+                    <p className="font-semibold text-gray-800">{patientName(selectedStatusAppointment.patient)}</p>
                     <p className="text-xs text-gray-500">
                       {formatDate(selectedStatusAppointment.date, { day: 'numeric', month: 'long' })} à {formatTime(selectedStatusAppointment.date)}
                     </p>
@@ -987,6 +993,7 @@ function DashboardDoctor() {
                 onChange={(e) => setNewStatus(e.target.value)}
                 className="w-full px-4 py-3 border border-gray-200 rounded-xl focus:outline-none focus:ring-2 focus:ring-blue-500"
               >
+                <option value="EN_ATTENTE">⏳ En attente validation</option>
                 <option value="CONFIRME">✅ Confirmé</option>
                 <option value="TERMINE">🏁 Terminé</option>
                 <option value="ANNULE">❌ Annulé</option>

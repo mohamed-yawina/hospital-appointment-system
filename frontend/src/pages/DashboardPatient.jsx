@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react'
+import React, { useState, useEffect, useMemo } from 'react'
 import { Link } from 'react-router-dom'
 import { pdf } from '@react-pdf/renderer'
 import {
@@ -20,7 +20,29 @@ import {
 import { StarIcon as StarSolidIcon } from '@heroicons/react/24/solid'
 import appointmentService from '../services/appointmentService'
 import doctorService from '../services/doctorService'
+import reviewService from '../services/reviewService'
 import AppointmentPDF from '../components/AppointmentPDF'
+import DoctorAvailabilityCalendar from '../components/DoctorAvailabilityCalendar'
+import { doctorName } from '../utils/doctorPatient'
+
+/** Mappe une Review API vers le format affiché dans le tableau de bord */
+function mapReviewFromApi(r) {
+  const d = r.doctor
+  const name = doctorName(d)
+  const apptId = r.appointment?.id ?? r.appointmentId ?? null
+  return {
+    id: r.id,
+    appointmentId: apptId != null ? Number(apptId) : null,
+    doctorId: d?.id,
+    doctorName: name,
+    doctorSpecialty: d?.specialty?.name,
+    doctorAvatar: name?.charAt(0) || 'D',
+    rating: Number(r.note) || 5,
+    comment: r.commentaire || '',
+    date: r.createdAt || new Date().toISOString(),
+    validated: !!r.validated,
+  }
+}
 
 /* ─── Design tokens ──────────────────────────────────────────────────── */
 const style = `
@@ -161,6 +183,7 @@ const style = `
   .badge-blue  { background: #dbeafe; color: #1e40af; }
   .badge-red   { background: #fee2e2; color: #991b1b; }
   .badge-gray  { background: #f3f4f6; color: #6b7280; }
+  .badge-gold  { background: #fef3c7; color: #92400e; }
 
   .stars { display: flex; gap: 2px; }
 
@@ -252,10 +275,41 @@ const style = `
 
 function StatusBadge({ status, date }) {
   const isPast = new Date(date) < new Date()
-  if (status === 'CONFIRME' && !isPast) return <span className="badge badge-green"><CheckCircleIcon style={{width:12,height:12}}/>Confirmé</span>
-  if (status === 'CONFIRME' && isPast)  return <span className="badge badge-gray"><ClockIcon style={{width:12,height:12}}/>Passé</span>
-  if (status === 'ANNULE')              return <span className="badge badge-red"><XMarkIcon style={{width:12,height:12}}/>Annulé</span>
-  if (status === 'TERMINE')             return <span className="badge badge-blue"><CheckCircleIcon style={{width:12,height:12}}/>Terminé</span>
+  if (status === 'EN_ATTENTE')
+    return (
+      <span className="badge badge-blue">
+        <ClockIcon style={{ width: 12, height: 12 }} />
+        En attente
+      </span>
+    )
+  if (status === 'CONFIRME' && !isPast)
+    return (
+      <span className="badge badge-green">
+        <CheckCircleIcon style={{ width: 12, height: 12 }} />
+        Confirmé
+      </span>
+    )
+  if (status === 'CONFIRME' && isPast)
+    return (
+      <span className="badge badge-gray">
+        <ClockIcon style={{ width: 12, height: 12 }} />
+        Passé
+      </span>
+    )
+  if (status === 'ANNULE')
+    return (
+      <span className="badge badge-red">
+        <XMarkIcon style={{ width: 12, height: 12 }} />
+        Annulé
+      </span>
+    )
+  if (status === 'TERMINE')
+    return (
+      <span className="badge badge-blue">
+        <CheckCircleIcon style={{ width: 12, height: 12 }} />
+        Terminé
+      </span>
+    )
   return null
 }
 
@@ -277,6 +331,7 @@ function DashboardPatient() {
   const [loading, setLoading] = useState(true)
   const [selectedDoctor, setSelectedDoctor] = useState(null)
   const [appointmentDate, setAppointmentDate] = useState('')
+  const [slotPickerOpen, setSlotPickerOpen] = useState(false)
   const [message, setMessage] = useState('')
   const [messageType, setMessageType] = useState('success')
   const [searchTerm, setSearchTerm] = useState('')
@@ -286,31 +341,149 @@ function DashboardPatient() {
   const [selectedAppointmentForReview, setSelectedAppointmentForReview] = useState(null)
   const [reviewData, setReviewData] = useState({ rating: 5, comment: '' })
   const [reviews, setReviews] = useState([])
+  const [publishedReviews, setPublishedReviews] = useState([])
+  const [doctorHasSlotsMap, setDoctorHasSlotsMap] = useState({})
+  const [selectedDoctorAvailabilities, setSelectedDoctorAvailabilities] = useState([])
+  const [loadingDoctorSlots, setLoadingDoctorSlots] = useState(false)
   const [activeTab, setActiveTab] = useState('appointments')
   const [upcomingAppointments, setUpcomingAppointments] = useState([])
   const [pastAppointments, setPastAppointments] = useState([])
   const [isBooking, setIsBooking] = useState(false)
 
+  const reviewableAppointments = useMemo(
+    () =>
+      appointments.filter(
+        (a) =>
+          a.status === 'TERMINE' &&
+          !reviews.some(
+            (r) =>
+              r.appointmentId != null && Number(r.appointmentId) === Number(a.id)
+          )
+      ),
+    [appointments, reviews]
+  )
+
+  useEffect(() => {
+    if (!showReviewModal) return
+    if (selectedAppointmentForReview) return
+    if (reviewableAppointments.length === 1) {
+      setSelectedAppointmentForReview(reviewableAppointments[0])
+    }
+  }, [showReviewModal, reviewableAppointments, selectedAppointmentForReview])
+
   useEffect(() => { fetchData() }, [])
 
   useEffect(() => {
-    const now = new Date()
-    setUpcomingAppointments(appointments.filter(a => a.status === 'CONFIRME' && new Date(a.date) > now))
-    setPastAppointments(appointments.filter(a => a.status === 'TERMINE' || a.status === 'ANNULE' || (a.status === 'CONFIRME' && new Date(a.date) < now)))
+    const terminal = (a) =>
+      a.status === 'TERMINE' || a.status === 'ANNULE'
+    const upcoming = appointments.filter((a) => {
+      if (terminal(a)) return false
+      const d = new Date(a.date).getTime()
+      const today0 = new Date()
+      today0.setHours(0, 0, 0, 0)
+      return d >= today0.getTime()
+    })
+    const upcomingIds = new Set(upcoming.map((a) => a.id))
+    const past = appointments.filter((a) => !upcomingIds.has(a.id))
+    setUpcomingAppointments(upcoming)
+    setPastAppointments(past)
   }, [appointments])
+
+  useEffect(() => {
+    if (!doctors.length) {
+      setDoctorHasSlotsMap({})
+      return
+    }
+    let cancelled = false
+    Promise.all(
+      doctors.map(async (d) => {
+        const list = await doctorService.getAvailabilities(d.id).catch(() => [])
+        return [d.id, Array.isArray(list) && list.length > 0]
+      })
+    ).then((pairs) => {
+      if (cancelled) return
+      const m = {}
+      pairs.forEach(([id, has]) => {
+        m[id] = has
+      })
+      setDoctorHasSlotsMap(m)
+    })
+    return () => {
+      cancelled = true
+    }
+  }, [doctors])
+
+  useEffect(() => {
+    if (!selectedDoctor?.id) {
+      setSelectedDoctorAvailabilities([])
+      setSlotPickerOpen(false)
+      return
+    }
+    setSlotPickerOpen(true)
+    let cancelled = false
+    setLoadingDoctorSlots(true)
+    doctorService
+      .getAvailabilities(selectedDoctor.id)
+      .then((list) => {
+        if (!cancelled) setSelectedDoctorAvailabilities(list || [])
+      })
+      .catch(() => {
+        if (!cancelled) setSelectedDoctorAvailabilities([])
+      })
+      .finally(() => {
+        if (!cancelled) setLoadingDoctorSlots(false)
+      })
+    return () => {
+      cancelled = true
+    }
+  }, [selectedDoctor?.id])
 
   const fetchData = async () => {
     setLoading(true)
     try {
-      const [appointmentsData, doctorsData] = await Promise.all([
-        appointmentService.getMyAppointments(),
-        doctorService.getAllDoctors()
-      ])
-      setAppointments(appointmentsData || [])
-      setDoctors(doctorsData || [])
-      setSpecialties([...new Set(doctorsData.map(d => d.specialty?.name).filter(Boolean))])
-      const saved = localStorage.getItem('patientReviews')
-      if (saved) setReviews(JSON.parse(saved))
+      const appointmentsData =
+        await appointmentService.getMyAppointments().catch((e) => {
+          console.error('RDV:', e.response?.status, e.response?.data ?? e.message)
+          return []
+        })
+
+      const doctorsData = await doctorService.getAllDoctors().catch((e) => {
+        console.error('Médecins:', e.response?.status, e.response?.data ?? e.message)
+        return []
+      })
+
+      let publishedList = []
+      try {
+        publishedList = await reviewService.getPublishedReviews()
+      } catch (e) {
+        console.error('Avis publics:', e.response?.status, e.response?.data ?? e.message)
+      }
+
+      setAppointments(Array.isArray(appointmentsData) ? appointmentsData : [])
+      const docs = Array.isArray(doctorsData) ? doctorsData : []
+      setDoctors(docs)
+      setPublishedReviews(Array.isArray(publishedList) ? publishedList : [])
+      setSpecialties([...new Set(docs.map((d) => d.specialty?.name).filter(Boolean))])
+
+      let mergedReviews = []
+      try {
+        const mine = await reviewService.getMyReviews()
+        mergedReviews = (Array.isArray(mine) ? mine : []).map(mapReviewFromApi)
+      } catch (e) {
+        console.error('Mes avis:', e.response?.status, e.response?.data ?? e.message)
+      }
+      if (mergedReviews.length === 0) {
+        const saved = localStorage.getItem('patientReviews')
+        if (saved) {
+          try {
+            const parsed = JSON.parse(saved)
+            mergedReviews = Array.isArray(parsed) ? parsed : []
+          } catch {
+            mergedReviews = []
+          }
+        }
+      }
+      setReviews(mergedReviews)
     } catch (error) {
       console.error('Erreur chargement:', error)
       showMessage('Erreur lors du chargement des données', 'error')
@@ -325,17 +498,38 @@ function DashboardPatient() {
     setTimeout(() => setMessage(''), 4000)
   }
 
-  const isAvailableThisWeek = (doctor) => {
-    if (!doctor.availability) return false
-    try {
-      const availability = JSON.parse(doctor.availability)
-      const today = new Date()
-      const dayNames = ['sunday', 'monday', 'tuesday', 'wednesday', 'thursday', 'friday', 'saturday']
-      const currentDay = dayNames[today.getDay()]
-      return availability[currentDay] && availability[currentDay].length > 0
-    } catch {
-      return false
+  /** Toujours afficher le bouton « Ajouter un avis » ; ouvre le formulaire seulement s’il existe un RDV terminé éligible. */
+  const openAddReviewFlow = () => {
+    if (reviewableAppointments.length > 0) {
+      setReviewData({ rating: 5, comment: '' })
+      setSelectedAppointmentForReview(
+        reviewableAppointments.length === 1 ? reviewableAppointments[0] : null
+      )
+      setShowReviewModal(true)
+      return
     }
+    if (appointments.some((a) => a.status === 'TERMINE')) {
+      showMessage(
+        'Vous avez déjà laissé un avis pour chaque consultation terminée.',
+        'error'
+      )
+      return
+    }
+    if (appointments.length > 0) {
+      showMessage(
+        'Un avis n’est possible qu’après au moins un rendez-vous au statut « terminé » (après la consultation).',
+        'error'
+      )
+      return
+    }
+    showMessage(
+      'Prenez d’abord un rendez-vous via « Trouver un médecin », puis revenez ici une fois la consultation terminée.',
+      'error'
+    )
+  }
+
+  const isAvailableThisWeek = (doctor) => {
+    return !!doctorHasSlotsMap[doctor.id]
   }
 
   const getPatientCount = (doctorId) => {
@@ -353,34 +547,55 @@ function DashboardPatient() {
     setIsBooking(true)
     
     try {
-      const response = await appointmentService.createAppointment({ 
-        doctorId: selectedDoctor.id, 
-        date: appointmentDate 
+      const response = await appointmentService.createAppointment({
+        doctorId: selectedDoctor.id,
+        date: appointmentDate,
       })
-      
-      const user = JSON.parse(localStorage.getItem('user') || '{}')
-      const blob = await pdf(
-        <AppointmentPDF 
-          appointment={response} 
-          doctor={selectedDoctor} 
-          patient={user} 
-        />
-      ).toBlob()
 
-      const url = URL.createObjectURL(blob)
-      const link = document.createElement('a')
-      link.href = url
-      link.download = `rendez-vous_${response.id}_${new Date().toISOString().split('T')[0]}.pdf`
-      link.click()
-      URL.revokeObjectURL(url)
-      
-      showMessage('Rendez-vous réservé ! Le PDF a été téléchargé.', 'success')
+      const user = JSON.parse(localStorage.getItem('user') || '{}')
+
+      if (response.status === 'CONFIRME') {
+        const blob = await pdf(
+          <AppointmentPDF appointment={response} doctor={selectedDoctor} patient={user} />
+        ).toBlob()
+        const url = URL.createObjectURL(blob)
+        const link = document.createElement('a')
+        link.href = url
+        link.download = `rendez-vous_${response.id}_${
+          new Date().toISOString().split('T')[0]
+        }.pdf`
+        link.click()
+        URL.revokeObjectURL(url)
+        showMessage('Rendez-vous confirmé ! Le PDF a été téléchargé.', 'success')
+      } else {
+        const blob = await pdf(
+          <AppointmentPDF appointment={response} doctor={selectedDoctor} patient={user} />
+        ).toBlob()
+        const url = URL.createObjectURL(blob)
+        const link = document.createElement('a')
+        link.href = url
+        link.download = `demande_rdV_${response.id}.pdf`
+        link.click()
+        URL.revokeObjectURL(url)
+        showMessage(
+          'Demande enregistrée (en attente de confirmation du médecin). Un PDF récapitulatif a été téléchargé.',
+          'success'
+        )
+      }
+
       setSelectedDoctor(null)
       setAppointmentDate('')
       fetchData()
     } catch (error) {
       console.error('Erreur réservation:', error)
-      showMessage(error.response?.data?.message || 'Erreur lors de la réservation', 'error')
+      const data = error.response?.data
+      const msg =
+        (typeof data === 'string' ? data : data?.message) ||
+        (error.response?.status === 403
+          ? 'Accès refusé : redémarrez le backend puis reconnectez-vous.'
+          : null) ||
+        'Erreur lors de la réservation'
+      showMessage(msg, 'error')
     } finally {
       setIsBooking(false)
     }
@@ -398,42 +613,71 @@ function DashboardPatient() {
     }
   }
 
-  const handleSubmitReview = () => {
+  const handleSubmitReview = async () => {
+    if (!selectedAppointmentForReview?.doctor?.id) {
+      showMessage('Choisissez la consultation terminée pour laquelle vous notez.', 'error')
+      return
+    }
     if (!reviewData.comment.trim()) {
       showMessage('Veuillez écrire un commentaire', 'error')
       return
     }
-    const newReview = {
-      id: Date.now(),
-      doctorId: selectedAppointmentForReview.doctor.id,
-      doctorName: selectedAppointmentForReview.doctor.user.name,
-      doctorSpecialty: selectedAppointmentForReview.doctor.specialty?.name,
-      doctorAvatar: selectedAppointmentForReview.doctor.user.name?.charAt(0) || 'D',
-      patientName: JSON.parse(localStorage.getItem('user'))?.name,
-      rating: reviewData.rating,
-      comment: reviewData.comment,
-      date: new Date().toISOString(),
-      appointmentId: selectedAppointmentForReview.id
+    try {
+      const created = await reviewService.createReview({
+        doctorId: selectedAppointmentForReview.doctor.id,
+        appointmentId: selectedAppointmentForReview.id,
+        commentaire: reviewData.comment.trim(),
+        note: reviewData.rating,
+      })
+      try {
+        const mine = await reviewService.getMyReviews()
+        const next = (Array.isArray(mine) ? mine : []).map(mapReviewFromApi)
+        setReviews(next)
+        localStorage.removeItem('patientReviews')
+      } catch {
+        setReviews((prev) => [
+          mapReviewFromApi({
+            ...created,
+            appointment: { id: selectedAppointmentForReview.id },
+            doctor:
+              created.doctor || selectedAppointmentForReview.doctor,
+          }),
+          ...prev.filter((p) => p.id !== created.id),
+        ])
+      }
+      setShowReviewModal(false)
+      setReviewData({ rating: 5, comment: '' })
+      setSelectedAppointmentForReview(null)
+      showMessage(
+        created.validated
+          ? 'Merci, votre avis est publié.'
+          : 'Avis envoyé. Il sera visible après validation par un administrateur.',
+        'success'
+      )
+    } catch (e) {
+      console.error(e)
+      const msg =
+        typeof e.response?.data === 'string'
+          ? e.response.data
+          : e.response?.data?.message
+      showMessage(msg || "Impossible d'envoyer l'avis", 'error')
     }
-    const updated = [newReview, ...reviews]
-    setReviews(updated)
-    localStorage.setItem('patientReviews', JSON.stringify(updated))
-    setShowReviewModal(false)
-    setReviewData({ rating: 5, comment: '' })
-    setSelectedAppointmentForReview(null)
-    showMessage('Merci pour votre avis !', 'success')
   }
 
-  const filteredDoctors = doctors.filter(d => {
+  const filteredDoctors = doctors.filter((d) => {
     const query = searchTerm.toLowerCase()
-    const matchesSearch = (d.user?.name?.toLowerCase().includes(query) || d.specialty?.name?.toLowerCase().includes(query))
+    const matchesSearch =
+      doctorName(d).toLowerCase().includes(query) ||
+      d.specialty?.name?.toLowerCase().includes(query)
     const matchesSpecialty = !selectedSpecialty || d.specialty?.name === selectedSpecialty
     return matchesSearch && matchesSpecialty
   })
 
   const getAverageRating = (id) => {
-    const doctorReviews = reviews.filter(r => r.doctorId === id)
-    return doctorReviews.length ? (doctorReviews.reduce((sum, r) => sum + r.rating, 0) / doctorReviews.length).toFixed(1) : null
+    const doctorReviews = publishedReviews.filter((r) => r.doctor?.id === id)
+    return doctorReviews.length
+      ? (doctorReviews.reduce((sum, r) => sum + (r.note ?? 0), 0) / doctorReviews.length).toFixed(1)
+      : null
   }
 
   const avgReview = reviews.length ? (reviews.reduce((sum, r) => sum + r.rating, 0) / reviews.length).toFixed(1) : '—'
@@ -569,11 +813,11 @@ function DashboardPatient() {
                             <div style={{display:'flex', justifyContent:'space-between', alignItems:'center', flexWrap:'wrap', gap:12}}>
                               <div style={{display:'flex', alignItems:'center', gap:12}}>
                                 <div className="doc-avatar" style={{width:44,height:44,fontSize:17,borderRadius:12}}>
-                                  {apt.doctor?.user?.name?.charAt(0) || 'D'}
+                                  {doctorName(apt.doctor)?.charAt(0) || 'D'}
                                 </div>
                                 <div>
                                   <div style={{display:'flex', alignItems:'center', gap:8, flexWrap:'wrap'}}>
-                                    <span style={{fontWeight:600, color:'var(--c-text)', fontSize:14}}>Dr. {apt.doctor?.user?.name}</span>
+                                    <span style={{fontWeight:600, color:'var(--c-text)', fontSize:14}}>Dr. {doctorName(apt.doctor)}</span>
                                     <StatusBadge status={apt.status} date={apt.date}/>
                                   </div>
                                   <p style={{color:'var(--c-muted)', fontSize:12, margin:'4px 0 0'}}>
@@ -605,11 +849,11 @@ function DashboardPatient() {
                                   background:'#e5e7eb', display:'flex', alignItems:'center', justifyContent:'center',
                                   color:'#9ca3af', fontWeight:700, fontFamily:'Syne, sans-serif'
                                 }}>
-                                  {apt.doctor?.user?.name?.charAt(0) || 'D'}
+                                  {doctorName(apt.doctor)?.charAt(0) || 'D'}
                                 </div>
                                 <div>
                                   <div style={{display:'flex', alignItems:'center', gap:8, flexWrap:'wrap'}}>
-                                    <span style={{fontWeight:600, color:'var(--c-text)', fontSize:14}}>Dr. {apt.doctor?.user?.name}</span>
+                                    <span style={{fontWeight:600, color:'var(--c-text)', fontSize:14}}>Dr. {doctorName(apt.doctor)}</span>
                                     <StatusBadge status={apt.status} date={apt.date}/>
                                   </div>
                                   <p style={{color:'var(--c-muted)', fontSize:12, margin:'4px 0 0'}}>
@@ -691,7 +935,7 @@ function DashboardPatient() {
                             <div style={{display:'flex', gap:14, alignItems:'flex-start'}}>
                               <div style={{position:'relative'}}>
                                 <div className="doc-avatar">
-                                  {doctor.user?.name?.charAt(0) || 'D'}
+                                  {doctorName(doctor)?.charAt(0) || 'D'}
                                 </div>
                                 {avg && (
                                   <div style={{
@@ -706,7 +950,7 @@ function DashboardPatient() {
                               </div>
                               <div>
                                 <h3 className="syne" style={{fontSize:15,fontWeight:700,color:'var(--c-text)',margin:'0 0 2px'}}>
-                                  Dr. {doctor.user?.name}
+                                  Dr. {doctorName(doctor)}
                                 </h3>
                                 <p style={{color:'var(--c-accent)',fontSize:12,fontWeight:600,margin:'0 0 4px'}}>
                                   {doctor.specialty?.name || 'Généraliste'}
@@ -716,10 +960,18 @@ function DashboardPatient() {
                               </div>
                             </div>
                             {isSelected
-                              ? <button style={{background:'none',border:'none',cursor:'pointer',color:'var(--c-muted)',padding:4}} onClick={() => setSelectedDoctor(null)}>
+                              ? <button style={{background:'none',border:'none',cursor:'pointer',color:'var(--c-muted)',padding:4}} onClick={() => {
+                                  setSelectedDoctor(null)
+                                  setAppointmentDate('')
+                                  setSlotPickerOpen(false)
+                                }}>
                                   <XMarkIcon style={{width:18,height:18}}/>
                                 </button>
-                              : <button className="btn-primary" style={{padding:'8px 14px',fontSize:12,flexShrink:0}} onClick={() => setSelectedDoctor(doctor)}>
+                              : <button className="btn-primary" style={{padding:'8px 14px',fontSize:12,flexShrink:0}} onClick={() => {
+                                  setSelectedDoctor(doctor)
+                                  setAppointmentDate('')
+                                  setSlotPickerOpen(true)
+                                }}>
                                   Prendre RDV
                                 </button>
                             }
@@ -738,32 +990,47 @@ function DashboardPatient() {
 
                           {isSelected && (
                             <div style={{marginTop:16, paddingTop:16, borderTop:'1px solid var(--c-border)', animation:'scaleIn .2s ease'}}>
-                              <label style={{display:'block', fontSize:13, fontWeight:600, color:'var(--c-text)', marginBottom:8}}>
-                                Sélectionnez une date et heure
-                              </label>
-                              <input
-                                type="datetime-local"
-                                value={appointmentDate}
-                                onChange={e => setAppointmentDate(e.target.value)}
-                                min={new Date().toISOString().slice(0,16)}
-                                className="date-input"
-                                style={{marginBottom:12}}
-                              />
-                              <div style={{display:'flex', gap:10}}>
+                              {loadingDoctorSlots ? (
+                                <p style={{ fontSize: 13, color: 'var(--c-muted)', marginBottom: 12 }}>
+                                  Chargement des créneaux…
+                                </p>
+                              ) : selectedDoctorAvailabilities.length === 0 ? (
+                                <p style={{ fontSize: 13, color: 'var(--c-red)', marginBottom: 12 }}>
+                                  Ce médecin n’a pas encore défini de plages disponibles.
+                                </p>
+                              ) : (
+                                <DoctorAvailabilityCalendar
+                                  availabilities={selectedDoctorAvailabilities}
+                                  selectedIso={appointmentDate}
+                                  doctorName={doctorName(selectedDoctor)}
+                                  open={slotPickerOpen}
+                                  onOpenChange={setSlotPickerOpen}
+                                  loading={loadingDoctorSlots}
+                                  onSelectSlot={(iso) => setAppointmentDate(iso)}
+                                />
+                              )}
+                              <div style={{display:'flex', gap:10, marginTop: 16}}>
                                 <button 
                                   className="btn-primary" 
                                   style={{flex:1,justifyContent:'center',background:'linear-gradient(135deg,#059669,#10b981)',boxShadow:'0 4px 14px rgba(5,150,105,.3)'}} 
                                   onClick={handleBookAppointment}
-                                  disabled={isBooking}
+                                  disabled={
+                                    isBooking ||
+                                    loadingDoctorSlots ||
+                                    !appointmentDate ||
+                                    selectedDoctorAvailabilities.length === 0
+                                  }
                                 >
-                                  {isBooking ? 'Réservation...' : 'Confirmer'}
+                                  {isBooking ? 'Réservation…' : 'Demander ce créneau'}
                                 </button>
                                 <button 
                                   className="btn-ghost" 
                                   style={{flex:1,justifyContent:'center'}} 
+                                  type="button"
                                   onClick={() => {
                                     setSelectedDoctor(null)
                                     setAppointmentDate('')
+                                    setSlotPickerOpen(false)
                                   }}
                                 >
                                   Annuler
@@ -782,10 +1049,30 @@ function DashboardPatient() {
 
           {activeTab === 'reviews' && (
             <div>
-              <h2 className="syne" style={{fontSize:20,fontWeight:700,color:'var(--c-text)',margin:'0 0 24px',display:'flex',alignItems:'center',gap:8}}>
-                <ChatBubbleLeftRightIcon style={{width:22,height:22,color:'var(--c-accent)'}}/>
-                Mes avis
-              </h2>
+              <div
+                style={{
+                  display: 'flex',
+                  justifyContent: 'space-between',
+                  alignItems: 'center',
+                  flexWrap: 'wrap',
+                  gap: 14,
+                  marginBottom: 24,
+                }}
+              >
+                <h2 className="syne" style={{fontSize:20,fontWeight:700,color:'var(--c-text)',margin:0,display:'flex',alignItems:'center',gap:8}}>
+                  <ChatBubbleLeftRightIcon style={{width:22,height:22,color:'var(--c-accent)'}}/>
+                  Mes avis
+                </h2>
+                <button
+                  type="button"
+                  className="btn-primary"
+                  style={{ padding: '10px 18px', fontSize: 14 }}
+                  onClick={openAddReviewFlow}
+                >
+                  <PlusCircleIcon style={{ width: 16, height: 16 }}/>
+                  Ajouter un avis
+                </button>
+              </div>
 
               {reviews.length === 0 ? (
                 <div className="empty-state">
@@ -793,10 +1080,17 @@ function DashboardPatient() {
                     <StarIcon style={{width:38,height:38,color:'var(--c-gold)'}}/>
                   </div>
                   <h3 className="syne" style={{fontSize:18,fontWeight:700,color:'var(--c-text)',margin:'0 0 8px'}}>Aucun avis pour le moment</h3>
-                  <p style={{color:'var(--c-muted)',fontSize:14,marginBottom:20}}>Partagez votre expérience après vos consultations</p>
-                  <button className="btn-primary" onClick={() => setActiveTab('appointments')}>
-                    <CalendarIcon style={{width:16,height:16}}/> Voir mes rendez-vous
-                  </button>
+                  <p style={{color:'var(--c-muted)',fontSize:14,marginBottom:20}}>
+                    Notez vos consultations après un rendez-vous marqué comme terminé. Votre texte sera vérifié par l’administration avant publication.
+                  </p>
+                  <div style={{ display: 'flex', flexWrap: 'wrap', gap: 10, justifyContent: 'center' }}>
+                    <button className="btn-primary" type="button" onClick={openAddReviewFlow}>
+                      <PlusCircleIcon style={{width:16,height:16}}/> Ajouter un avis
+                    </button>
+                    <button className="btn-ghost" type="button" onClick={() => setActiveTab('appointments')} style={{ border: '1px solid var(--c-border)', borderRadius: 10 }}>
+                      <CalendarIcon style={{width:16,height:16}}/> Voir mes rendez-vous
+                    </button>
+                  </div>
                 </div>
               ) : (
                 <div style={{display:'flex',flexDirection:'column',gap:12}}>
@@ -815,8 +1109,15 @@ function DashboardPatient() {
                         <Stars rating={review.rating} size={15}/>
                       </div>
                       <p style={{color:'var(--c-text)',fontSize:13,lineHeight:1.6,margin:'0 0 8px'}}>{review.comment}</p>
-                      <p style={{color:'var(--c-muted)',fontSize:11}}>
-                        Posté le {new Date(review.date).toLocaleDateString('fr-FR',{day:'numeric',month:'long',year:'numeric'})}
+                      <p style={{color:'var(--c-muted)',fontSize:11,display:'flex',flexWrap:'wrap',alignItems:'center',gap:8}}>
+                        <span>
+                          Posté le {new Date(review.date).toLocaleDateString('fr-FR',{day:'numeric',month:'long',year:'numeric'})}
+                        </span>
+                        {!review.validated && (
+                          <span className="badge badge-gold" style={{ padding: '4px 10px' }}>
+                            En attente de validation
+                          </span>
+                        )}
                       </p>
                     </div>
                   ))}
@@ -827,7 +1128,7 @@ function DashboardPatient() {
         </div>
       </div>
 
-      {showReviewModal && selectedAppointmentForReview && (
+      {showReviewModal && (
         <div className="modal-overlay">
           <div className="modal-box">
             <div style={{display:'flex',justifyContent:'space-between',alignItems:'center',marginBottom:20}}>
@@ -837,46 +1138,85 @@ function DashboardPatient() {
                 </div>
                 <h3 className="syne" style={{fontSize:18,fontWeight:700,color:'var(--c-text)',margin:0}}>Donner mon avis</h3>
               </div>
-              <button style={{background:'none',border:'none',cursor:'pointer',color:'var(--c-muted)',padding:6,borderRadius:8}} onClick={() => { setShowReviewModal(false); setSelectedAppointmentForReview(null); setReviewData({rating:5,comment:''}) }}>
+              <button type="button" style={{background:'none',border:'none',cursor:'pointer',color:'var(--c-muted)',padding:6,borderRadius:8}} onClick={() => { setShowReviewModal(false); setSelectedAppointmentForReview(null); setReviewData({rating:5,comment:''}) }}>
                 <XMarkIcon style={{width:20,height:20}}/>
               </button>
             </div>
 
-            <div style={{background:'var(--c-bg)',borderRadius:12,padding:14,marginBottom:18}}>
-              <p style={{fontSize:11,color:'var(--c-muted)',marginBottom:2}}>Consultation avec</p>
-              <p style={{fontWeight:600,color:'var(--c-text)',fontSize:14,margin:'0 0 2px'}}>Dr. {selectedAppointmentForReview.doctor?.user?.name}</p>
-              <p style={{fontSize:12,color:'var(--c-muted)',margin:0}}>
-                Le {new Date(selectedAppointmentForReview.date).toLocaleDateString('fr-FR',{day:'numeric',month:'long',year:'numeric'})}
+            {reviewableAppointments.length > 1 && (
+              <>
+                <label style={{display:'block',fontSize:13,fontWeight:600,color:'var(--c-text)',marginBottom:8}}>
+                  Rendez-vous terminé à noter
+                </label>
+                <select
+                  className="sel"
+                  style={{ width: '100%', marginBottom: 18 }}
+                  value={selectedAppointmentForReview?.id != null ? String(selectedAppointmentForReview.id) : ''}
+                  onChange={(e) => {
+                    const v = e.target.value
+                    const apt = reviewableAppointments.find((a) => String(a.id) === v)
+                    setSelectedAppointmentForReview(apt ?? null)
+                  }}
+                >
+                  <option value="">— Choisir —</option>
+                  {reviewableAppointments.map((apt) => (
+                    <option key={apt.id} value={String(apt.id)}>
+                      Dr. {doctorName(apt.doctor)} · {new Date(apt.date).toLocaleDateString('fr-FR', { weekday: 'short', day: 'numeric', month: 'short', year: 'numeric' })}
+                    </option>
+                  ))}
+                </select>
+              </>
+            )}
+
+            {selectedAppointmentForReview ? (
+              <div style={{background:'var(--c-bg)',borderRadius:12,padding:14,marginBottom:18}}>
+                <p style={{fontSize:11,color:'var(--c-muted)',marginBottom:2}}>Consultation avec</p>
+                <p style={{fontWeight:600,color:'var(--c-text)',fontSize:14,margin:'0 0 2px'}}>Dr. {doctorName(selectedAppointmentForReview.doctor)}</p>
+                <p style={{fontSize:12,color:'var(--c-muted)',margin:0}}>
+                  Le {new Date(selectedAppointmentForReview.date).toLocaleDateString('fr-FR',{day:'numeric',month:'long',year:'numeric'})}
+                </p>
+              </div>
+            ) : (
+              <p style={{ color: 'var(--c-muted)', fontSize: 13, marginBottom: 18 }}>
+                Sélectionnez le rendez-vous terminé que vous évaluez (obligatoire si vous en avez plusieurs).
               </p>
-            </div>
+            )}
 
-            <label style={{display:'block',fontSize:13,fontWeight:600,color:'var(--c-text)',marginBottom:10}}>Votre note</label>
-            <div style={{display:'flex',gap:10,justifyContent:'center',marginBottom:20}}>
-              {[1,2,3,4,5].map(s => (
-                <button key={s} style={{background:'none',border:'none',cursor:'pointer',padding:4,transition:'transform .15s'}}
-                  onClick={() => setReviewData({...reviewData,rating:s})}>
-                  {s <= reviewData.rating
-                    ? <StarSolidIcon style={{width:36,height:36,color:'#d97706'}}/>
-                    : <StarIcon style={{width:36,height:36,color:'#d1d5db'}}/>}
+            <fieldset
+              disabled={!selectedAppointmentForReview}
+              style={{ border: 'none', padding: 0, margin: 0, minInlineSize: 'unset' }}
+            >
+              <label style={{display:'block',fontSize:13,fontWeight:600,color:'var(--c-text)',marginBottom:10}}>Votre note</label>
+              <div style={{display:'flex',gap:10,justifyContent:'center',marginBottom:20}}>
+                {[1,2,3,4,5].map(s => (
+                  <button key={s} type="button" style={{background:'none',border:'none',cursor:'pointer',padding:4,transition:'transform .15s'}}
+                    onClick={() => setReviewData(prev => ({...prev,rating:s}))}>
+                    {s <= reviewData.rating
+                      ? <StarSolidIcon style={{width:36,height:36,color:'#d97706'}}/>
+                      : <StarIcon style={{width:36,height:36,color:'#d1d5db'}}/>}
+                  </button>
+                ))}
+              </div>
+
+              <label style={{display:'block',fontSize:13,fontWeight:600,color:'var(--c-text)',marginBottom:8}}>Votre commentaire</label>
+              <textarea
+                value={reviewData.comment}
+                onChange={e => setReviewData({...reviewData,comment:e.target.value})}
+                placeholder="Comment s'est passée votre consultation ?"
+                rows={4}
+                className="ta"
+                style={{marginBottom:18,width:'100%',boxSizing:'border-box'}}
+              />
+
+              <div style={{display:'flex',gap:10}}>
+                <button type="button" className="btn-primary" style={{flex:1,justifyContent:'center'}} onClick={handleSubmitReview}>
+                  Envoyer mon avis
                 </button>
-              ))}
-            </div>
+              </div>
+            </fieldset>
 
-            <label style={{display:'block',fontSize:13,fontWeight:600,color:'var(--c-text)',marginBottom:8}}>Votre commentaire</label>
-            <textarea
-              value={reviewData.comment}
-              onChange={e => setReviewData({...reviewData,comment:e.target.value})}
-              placeholder="Comment s'est passée votre consultation ?"
-              rows={4}
-              className="ta"
-              style={{marginBottom:18}}
-            />
-
-            <div style={{display:'flex',gap:10}}>
-              <button className="btn-primary" style={{flex:1,justifyContent:'center'}} onClick={handleSubmitReview}>
-                Publier mon avis
-              </button>
-              <button className="btn-ghost" style={{flex:1,justifyContent:'center'}} onClick={() => { setShowReviewModal(false); setSelectedAppointmentForReview(null) }}>
+            <div style={{marginTop:12}}>
+              <button type="button" className="btn-ghost" style={{width:'100%',justifyContent:'center'}} onClick={() => { setShowReviewModal(false); setSelectedAppointmentForReview(null); setReviewData({ rating: 5, comment: '' }) }}>
                 Annuler
               </button>
             </div>

@@ -27,18 +27,19 @@ public class AuthController {
 
     @PostMapping("/login")
     public LoginResponse login(@RequestBody LoginRequest request) {
+        String emailNorm = JwtUtils.normalizeEmail(request.getEmail());
         Authentication authentication = authenticationManager.authenticate(
-                new UsernamePasswordAuthenticationToken(request.getEmail(), request.getPassword())
+                new UsernamePasswordAuthenticationToken(emailNorm, request.getPassword())
         );
 
         SecurityContextHolder.getContext().setAuthentication(authentication);
 
-        User user = authService.getUserByEmail(request.getEmail());
+        User user = authService.getUserByEmail(emailNorm);
 
-        // ✅ Génère le token AVEC le rôle
-        String token = jwtUtils.generateToken(request.getEmail(), user.getRole().name());
+        // Token JWT : même sujet normalisé que celui utilisé dans JwtAuthFilter / UserDetails
+        String token = jwtUtils.generateToken(emailNorm, user.getRole().name());
 
-        System.out.println("🔐 Connexion - Email: " + request.getEmail());
+        System.out.println("🔐 Connexion - Email: " + emailNorm);
         System.out.println("🔐 Rôle: " + user.getRole().name());
         System.out.println("🔐 Token généré: " + token.substring(0, 50) + "...");
 

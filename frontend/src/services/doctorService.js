@@ -16,10 +16,23 @@ const doctorService = {
     return response.data
   },
 
-  updateAvailability: async (doctorId, availability) => {
-    const response = await api.put(`/doctors/${doctorId}/availability`, availability)
+  /** Créneaux réels backend (Availability) */
+  getAvailabilities: async (doctorId) => {
+    const response = await api.get(`/doctors/${doctorId}/availabilities`)
     return response.data
-  }
+  },
+
+  addAvailability: async (doctorId, { dateDebut, dateFin }) => {
+    const response = await api.post(`/doctors/${doctorId}/availabilities`, {
+      dateDebut,
+      dateFin,
+    })
+    return response.data
+  },
+
+  deleteAvailability: async (doctorId, availabilityId) => {
+    await api.delete(`/doctors/${doctorId}/availabilities/${availabilityId}`)
+  },
 }
 
 export default doctorService

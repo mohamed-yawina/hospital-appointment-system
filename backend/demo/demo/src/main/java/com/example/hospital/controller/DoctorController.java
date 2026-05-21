@@ -1,9 +1,14 @@
 package com.example.hospital.controller;
 
+import com.example.hospital.dto.AvailabilityRequest;
+import com.example.hospital.entity.Availability;
 import com.example.hospital.entity.Doctor;
 import com.example.hospital.service.DoctorService;
 import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.security.core.context.SecurityContextHolder;
+import org.springframework.security.core.userdetails.UserDetails;
 import org.springframework.web.bind.annotation.*;
+
 import java.util.List;
 
 @RestController
@@ -29,8 +34,23 @@ public class DoctorController {
         return doctorService.getDoctorsBySpecialty(specialtyName);
     }
 
-    @PutMapping("/{id}/availability")
-    public Doctor updateAvailability(@PathVariable Long id, @RequestBody String availability) {
-        return doctorService.updateAvailability(id, availability);
+    @GetMapping("/{id}/availabilities")
+    public List<Availability> getAvailabilities(@PathVariable Long id) {
+        return doctorService.listAvailabilities(id);
+    }
+
+    @PostMapping("/{id}/availabilities")
+    public Availability addAvailability(@PathVariable Long id, @RequestBody AvailabilityRequest request) {
+        return doctorService.addAvailability(id, request, getCurrentUserEmail());
+    }
+
+    @DeleteMapping("/{id}/availabilities/{availabilityId}")
+    public void deleteAvailability(@PathVariable Long id, @PathVariable Long availabilityId) {
+        doctorService.deleteAvailability(id, availabilityId, getCurrentUserEmail());
+    }
+
+    private String getCurrentUserEmail() {
+        UserDetails userDetails = (UserDetails) SecurityContextHolder.getContext().getAuthentication().getPrincipal();
+        return userDetails.getUsername();
     }
 }

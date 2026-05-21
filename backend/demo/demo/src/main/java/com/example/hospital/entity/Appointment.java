@@ -45,6 +45,8 @@ public class Appointment {
     @PrePersist
     protected void onCreate() {
         createdAt = LocalDateTime.now();
-        status = AppointmentStatus.CONFIRME;
+        if (status == null) {
+            status = AppointmentStatus.EN_ATTENTE;
+        }
     }
 }

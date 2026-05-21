@@ -17,12 +17,42 @@ import {
   Bars3Icon
 } from '@heroicons/react/24/outline'
 import { StarIcon as StarSolidIcon } from '@heroicons/react/24/solid'
+import reviewService from '../services/reviewService'
+import { doctorName, patientName } from '../utils/doctorPatient'
+
+const DEFAULT_TESTIMONIALS = [
+  {
+    name: 'Marie Lambert',
+    role: 'Patiente',
+    initials: 'ML',
+    content: 'Application formidable ! Je peux prendre RDV en quelques minutes sans me déplacer.',
+    rating: 5,
+    date: 'Il y a 2 jours',
+  },
+  {
+    name: 'Dr. Jean Martin',
+    role: 'Médecin Cardiologue',
+    initials: 'JM',
+    content: "La gestion des rendez-vous n'a jamais été aussi simple. Je recommande vivement !",
+    rating: 5,
+    date: 'Il y a 1 semaine',
+  },
+  {
+    name: 'Sophie Dubois',
+    role: 'Patiente',
+    initials: 'SD',
+    content: 'Les rappels par SMS sont très pratiques. Plus jamais de rendez-vous oublié.',
+    rating: 5,
+    date: 'Il y a 3 jours',
+  },
+]
 
 function LandingPage() {
   const [revealedSections, setRevealedSections] = useState({})
   const [isMobileMenuOpen, setIsMobileMenuOpen] = useState(false)
   const [isScrolled, setIsScrolled] = useState(false)
   const [activeSection, setActiveSection] = useState('hero')
+  const [testimonials, setTestimonials] = useState(DEFAULT_TESTIMONIALS)
   const navigate = useNavigate()
 
   useEffect(() => {
@@ -48,6 +78,35 @@ function LandingPage() {
     
     window.addEventListener('scroll', handleScroll)
     return () => window.removeEventListener('scroll', handleScroll)
+  }, [])
+
+  useEffect(() => {
+    reviewService
+      .getPublishedReviews()
+      .then((list) => {
+        if (!Array.isArray(list) || list.length === 0) return
+        setTestimonials(
+          list.map((r) => {
+            const name = patientName(r.patient) || 'Patient'
+            const doctor = doctorName(r.doctor)
+            return {
+              name,
+              role: doctor ? `Patient · Dr. ${doctor}` : 'Patient',
+              initials: name.charAt(0).toUpperCase() || 'P',
+              content: r.commentaire,
+              rating: r.note || 5,
+              date: r.createdAt
+                ? new Date(r.createdAt).toLocaleDateString('fr-FR', {
+                    day: 'numeric',
+                    month: 'long',
+                    year: 'numeric',
+                  })
+                : '',
+            }
+          })
+        )
+      })
+      .catch(() => {})
   }, [])
 
   useEffect(() => {
@@ -139,33 +198,6 @@ function LandingPage() {
       bg: '#ecfeff',
       title: "Suivi personnalisé",
       description: "Consultez votre historique médical"
-    }
-  ]
-
-  const testimonials = [
-    {
-      name: "Marie Lambert",
-      role: "Patiente",
-      initials: "ML",
-      content: "Application formidable ! Je peux prendre RDV en quelques minutes sans me déplacer.",
-      rating: 5,
-      date: "Il y a 2 jours"
-    },
-    {
-      name: "Dr. Jean Martin",
-      role: "Médecin Cardiologue",
-      initials: "JM",
-      content: "La gestion des rendez-vous n'a jamais été aussi simple. Je recommande vivement !",
-      rating: 5,
-      date: "Il y a 1 semaine"
-    },
-    {
-      name: "Sophie Dubois",
-      role: "Patiente",
-      initials: "SD",
-      content: "Les rappels par SMS sont très pratiques. Plus jamais de rendez-vous oublié.",
-      rating: 5,
-      date: "Il y a 3 jours"
     }
   ]
 

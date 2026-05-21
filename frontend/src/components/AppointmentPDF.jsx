@@ -422,6 +422,19 @@ function AppointmentPDF({ appointment, doctor, patient }) {
   const date     = appointment?.date ? new Date(appointment.date) : new Date()
   const refCode  = formatCode(appointment?.id)
   const issuedOn = fmtDateShort(new Date())
+  const doctorLabelName = doctor?.name ?? doctor?.user?.name
+  const doctorLabelEmail = doctor?.email ?? doctor?.user?.email
+  const st = appointment?.status
+  const statusFr =
+    st === 'CONFIRME'
+      ? 'Confirmé'
+      : st === 'EN_ATTENTE'
+        ? 'En attente de confirmation'
+        : st === 'ANNULE'
+          ? 'Annulé'
+          : st === 'TERMINE'
+            ? 'Terminé'
+            : 'Enregistré'
 
   return (
     <Document
@@ -447,7 +460,7 @@ function AppointmentPDF({ appointment, doctor, patient }) {
             <Text style={s.sidebarLabel}>Statut</Text>
             <View style={s.statusPill}>
               <View style={s.statusDot}/>
-              <Text style={s.statusText}>Confirmé</Text>
+              <Text style={s.statusText}>{statusFr}</Text>
             </View>
           </View>
 
@@ -460,7 +473,7 @@ function AppointmentPDF({ appointment, doctor, patient }) {
           {/* Doctor */}
           <View style={s.sidebarSection}>
             <Text style={s.sidebarLabel}>Médecin traitant</Text>
-            <Text style={s.sidebarValue}>Dr. {doctor?.user?.name}</Text>
+            <Text style={s.sidebarValue}>Dr. {doctorLabelName}</Text>
             <Text style={s.sidebarValueMuted}>{doctor?.specialty?.name || 'Généraliste'}</Text>
           </View>
 
@@ -516,7 +529,7 @@ function AppointmentPDF({ appointment, doctor, patient }) {
             <View style={s.cardGrid}>
               <View style={s.cardCell}>
                 <Text style={s.cellLabel}>Nom complet</Text>
-                <Text style={s.cellValue}>Dr. {doctor?.user?.name}</Text>
+                <Text style={s.cellValue}>Dr. {doctorLabelName}</Text>
               </View>
               <View style={s.cardCell}>
                 <Text style={s.cellLabel}>Spécialité</Text>
@@ -524,7 +537,7 @@ function AppointmentPDF({ appointment, doctor, patient }) {
               </View>
               <View style={s.cardCell}>
                 <Text style={s.cellLabel}>Email</Text>
-                <Text style={s.cellValue}>{doctor?.user?.email || '—'}</Text>
+                <Text style={s.cellValue}>{doctorLabelEmail || '—'}</Text>
               </View>
               <View style={s.cardCell}>
                 <Text style={s.cellLabel}>Type de consultation</Text>
