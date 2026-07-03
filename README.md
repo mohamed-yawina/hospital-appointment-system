@@ -1,6 +1,3 @@
-Basé sur ton cahier des charges. 
-
-````markdown
 # 🏥 Application Web de Gestion des Rendez-vous d’Hôpital
 
 Application web conçue pour digitaliser la gestion des rendez-vous médicaux dans les hôpitaux et cliniques.
@@ -532,4 +529,3 @@ Projet réalisé dans le cadre d’un projet académique.
 ## 📄 Licence
 
 Ce projet est développé à des fins éducatives et académiques.
-````
